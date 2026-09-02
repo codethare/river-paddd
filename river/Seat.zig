@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: © 2020 The River Developers
+// SPDX-FileCopyrightText: © 2026 codethare
 // SPDX-License-Identifier: GPL-3.0-only
 
 const Seat = @This();

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: © 2026 codethare
+SPDX-License-Identifier: CC-BY-SA-4.0
+-->
+
 # River + flume — Touchpad Gesture → Virtual Key (Route B, per R2)
 
 **Decision.** Adopt Reviewer 2's more-general alternative over the flume-only seat binding:

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: © 2025 The River Developers
+// SPDX-FileCopyrightText: © 2026 codethare
 // SPDX-License-Identifier: GPL-3.0-only
 
 /// Configuration and pure logic for touchpad swipe → key injection.
