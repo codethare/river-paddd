@@ -56,10 +56,10 @@ pub fn resolveDirection(dx: f64, dy: f64, natural_scroll: bool) ?Direction {
 /// Reserved keysyms, indexed by [finger index][direction]. null entries are
 /// consumed but fire nothing:
 /// 3 fingers: up=F1 down=F2 left=F3 right=F4
-/// 4 fingers: up=F5 down=F6 (left/right unmapped)
+/// 4 fingers: up=F5 down=F6 left=F7 right=F8
 pub const reserved = [2][4]?xkb.Keysym{
     .{ .F1, .F2, .F3, .F4 },
-    .{ .F5, .F6, null, null },
+    .{ .F5, .F6, .F7, .F8 },
 };
 
 test "finger index, direction resolution and reserved table" {
@@ -84,6 +84,6 @@ test "finger index, direction resolution and reserved table" {
     try testing.expectEqual(xkb.Keysym.F4, reserved[0][@intFromEnum(Direction.right)].?);
     try testing.expectEqual(xkb.Keysym.F5, reserved[1][@intFromEnum(Direction.up)].?);
     try testing.expectEqual(xkb.Keysym.F6, reserved[1][@intFromEnum(Direction.down)].?);
-    try testing.expect(reserved[1][@intFromEnum(Direction.left)] == null);
-    try testing.expect(reserved[1][@intFromEnum(Direction.right)] == null);
+    try testing.expectEqual(xkb.Keysym.F7, reserved[1][@intFromEnum(Direction.left)].?);
+    try testing.expectEqual(xkb.Keysym.F8, reserved[1][@intFromEnum(Direction.right)].?);
 }
