@@ -256,7 +256,22 @@ pub fn build(b: *Build) !void {
         });
         const run_slotmap_test = b.addRunArtifact(slotmap_test);
 
+        const gesture_config_test = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("river/gesture_config.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "xkbcommon", .module = xkbcommon },
+                },
+            }),
+            .use_llvm = use_llvm,
+            .use_lld = use_llvm,
+        });
+        const run_gesture_config_test = b.addRunArtifact(gesture_config_test);
+
         const test_step = b.step("test", "Run the tests");
         test_step.dependOn(&run_slotmap_test.step);
+        test_step.dependOn(&run_gesture_config_test.step);
     }
 }

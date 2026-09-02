@@ -14,11 +14,14 @@ const river = wayland.server.river;
 const ext = wayland.server.ext;
 const xkb = @import("xkbcommon");
 
+const c = @import("c");
+
 const server = &@import("main.zig").server;
 const util = @import("util.zig");
 
 const Cursor = @import("Cursor.zig");
 const DragIcon = @import("DragIcon.zig");
+const GestureConfig = @import("gesture_config.zig");
 const InputDevice = @import("InputDevice.zig");
 const InputManager = @import("InputManager.zig");
 const InputRelay = @import("InputRelay.zig");
@@ -210,6 +213,17 @@ wm_requested: struct {
     pointer_warp: ?struct { x: i32, y: i32 } = null,
 } = .{},
 
+/// An in-progress touchpad swipe taken over for key injection (fingers != 0).
+swipe: struct {
+    fingers: u32 = 0,
+    dx: f64 = 0,
+    dy: f64 = 0,
+} = .{},
+
+/// A gesture key press already sent to the window manager; the release is
+/// injected at the start of the next processEvents() pump, after the press ack.
+pending_gesture_release: ?*XkbBinding = null,
+
 xkb_bindings: wl.list.Head(XkbBinding, .link),
 pointer_bindings: wl.list.Head(PointerBinding, .link),
 
@@ -365,6 +379,14 @@ pub fn queueEvent(seat: *Seat, event: Event) !void {
 pub fn processEvents(seat: *Seat) void {
     assert(server.wm.state == .idle);
 
+    // A gesture key press was sent to the window manager on a previous pump;
+    // send the release now that the press has been acked, before any new events.
+    if (seat.pending_gesture_release) |binding| {
+        seat.pending_gesture_release = null;
+        binding.stopRepeat();
+        binding.released();
+    }
+
     // Only process events while there is no new state to be sent to the window manager.
     // The window manager might decide to change focus or redefine keyboard/pointer bindings
     // in response, which can affect further processing of events.
@@ -385,9 +407,9 @@ pub fn processEvents(seat: *Seat) void {
             .pointer_axis => |ev| seat.cursor.processAxis(&ev),
             .pointer_frame => seat.wlr_seat.pointerNotifyFrame(),
 
-            .pointer_swipe_begin => |ev| pg.sendSwipeBegin(seat.wlr_seat, ev.time_msec, ev.fingers),
-            .pointer_swipe_update => |ev| pg.sendSwipeUpdate(seat.wlr_seat, ev.time_msec, ev.dx, ev.dy),
-            .pointer_swipe_end => |ev| pg.sendSwipeEnd(seat.wlr_seat, ev.time_msec, ev.cancelled),
+            .pointer_swipe_begin => |ev| seat.handleSwipeBegin(ev),
+            .pointer_swipe_update => |ev| seat.handleSwipeUpdate(ev),
+            .pointer_swipe_end => |ev| seat.handleSwipeEnd(ev),
 
             .pointer_pinch_begin => |ev| pg.sendPinchBegin(seat.wlr_seat, ev.time_msec, ev.fingers),
             .pointer_pinch_update => |ev| pg.sendPinchUpdate(seat.wlr_seat, ev.time_msec, ev.dx, ev.dy, ev.scale, ev.rotation),
@@ -398,6 +420,88 @@ pub fn processEvents(seat: *Seat) void {
         }
     }
     assert(server.wm.state == .idle);
+}
+
+fn handleSwipeBegin(seat: *Seat, ev: Event.PointerSwipeBegin) void {
+    if (GestureConfig.enabled and GestureConfig.fingerIndex(ev.fingers) != null) {
+        seat.swipe = .{ .fingers = ev.fingers };
+    } else {
+        server.input_manager.pointer_gestures.sendSwipeBegin(seat.wlr_seat, ev.time_msec, ev.fingers);
+    }
+}
+
+fn handleSwipeUpdate(seat: *Seat, ev: Event.PointerSwipeUpdate) void {
+    if (seat.swipe.fingers != 0) {
+        seat.swipe.dx += ev.dx;
+        seat.swipe.dy += ev.dy;
+    } else {
+        server.input_manager.pointer_gestures.sendSwipeUpdate(seat.wlr_seat, ev.time_msec, ev.dx, ev.dy);
+    }
+}
+
+const min_swipe_delta = 10.0;
+
+fn handleSwipeEnd(seat: *Seat, ev: Event.PointerSwipeEnd) void {
+    const fingers = seat.swipe.fingers;
+    const dx = seat.swipe.dx;
+    const dy = seat.swipe.dy;
+    seat.swipe = .{};
+
+    if (fingers == 0) {
+        server.input_manager.pointer_gestures.sendSwipeEnd(seat.wlr_seat, ev.time_msec, ev.cancelled);
+        return;
+    }
+    if (ev.cancelled) return;
+
+    const fingers_index = GestureConfig.fingerIndex(fingers) orelse return;
+    const direction = GestureConfig.resolveDirection(dx, dy, seat.naturalScroll()) orelse return;
+    if (GestureConfig.reserved[fingers_index][@intFromEnum(direction)]) |keysym| {
+        seat.injectGestureKey(keysym);
+    }
+}
+
+/// Fire the window manager binding for `keysym`, or consume the gesture if
+/// unbound. Bindings are matched by keysym directly: the reserved keysyms
+/// need not exist in any keymap.
+fn injectGestureKey(seat: *Seat, keysym: xkb.Keysym) void {
+    if (seat.pending_gesture_release != null) return; // a press is still unacked
+
+    const group = seat.gestureGroup() orelse return;
+    const modifiers = group.state.getModifiers();
+
+    var it = seat.xkb_bindings.iterator(.forward);
+    while (it.next()) |binding| {
+        if (!binding.wm_requested.enabled) continue;
+        if (binding.keysym != keysym) continue;
+        if (@as(u32, @bitCast(modifiers)) != @as(u32, @bitCast(binding.modifiers))) continue;
+
+        // Send the press now; the release follows at the start of the next pump,
+        // mirroring how a normal key press/release is handled.
+        seat.pending_gesture_release = binding;
+        binding.pressed();
+        return;
+    }
+}
+
+/// The keyboard group whose state is the seat keyboard, or the first one.
+fn gestureGroup(seat: *Seat) ?*KeyboardGroup {
+    const wlr_keyboard = seat.wlr_seat.getKeyboard() orelse return seat.keyboard_groups.first();
+    return @ptrCast(@alignCast(wlr_keyboard.data));
+}
+
+/// Natural scroll setting of the first pointer libinput device on this seat.
+/// ponytail: swipe events carry no device, so the first pointer device stands
+/// in for all of the seat's touchpads.
+fn naturalScroll(seat: *Seat) bool {
+    var it = server.input_manager.devices.iterator(.forward);
+    while (it.next()) |device| {
+        if (device.seat != seat) continue;
+        if (device.virtual) continue;
+        if (device.wlr_device.type != .pointer) continue;
+        if (c.libinput_device_config_scroll_has_natural_scroll(device.libinput.libinput) == 0) continue;
+        return c.libinput_device_config_scroll_get_natural_scroll_enabled(device.libinput.libinput) != 0;
+    }
+    return false;
 }
 
 pub fn manageStart(seat: *Seat) void {
