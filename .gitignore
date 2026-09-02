@@ -4,3 +4,8 @@
 .zig-cache/
 zig-out/
 zig-pkg/
+.builds/
+.codegraph/
+.forgejo/
+.pi/
+openspec/
