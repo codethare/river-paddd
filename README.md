@@ -1,5 +1,6 @@
 <!--
 SPDX-FileCopyrightText: © 2020 The River Developers
+SPDX-FileCopyrightText: © 2026 codethare
 SPDX-License-Identifier: CC-BY-SA-4.0
 -->
 
@@ -21,6 +22,25 @@ There is a [list of compatible window managers] on our [wiki](https://codeberg.o
 
 > *If you are looking for the old dynamic tiling version of river, see
 [river-classic](https://codeberg.org/river/river-classic).*
+
+## Fork
+
+This repository is a fork of [river](https://codeberg.org/river/river) that adds
+compositor-side touchpad gesture bindings: **3-finger and 4-finger swipes are
+consumed by the compositor** and turned into key press/release events instead of
+being forwarded to apps as pointer gestures. Direction is resolved from the
+accumulated swipe delta (honoring each touchpad's natural scroll sense) and
+mapped to a reserved keysym:
+
+| fingers | up | down | left | right |
+|---------|----|------|------|-------|
+| 3       | F1 | F2   | F3   | F4    |
+| 4       | F5 | F6   | F7   | F8    |
+
+Because the synthesized keys go through river's existing keybinding stack, any
+window manager (or riverctl binding) can bind them like ordinary keysyms. The
+mapping lives in `river/gesture_config.zig`; see `route-a-gesture-patch-plan.md`
+for the design rationale.
 
 ## Links
 
