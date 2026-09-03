@@ -64,6 +64,230 @@ pub const Border = struct {
     a: u32 = 0,
 };
 
+/// Radius in pixels of the rounded corners drawn on window borders.
+/// Fixed compositor-side value, see SPEC-rounded-window-borders.md.
+const border_radius: u31 = 10;
+
+/// A premultiplied ARGB8888 image of a window's border frame, uploaded to the
+/// GPU as a custom wlr.Buffer. wlroots 0.20 has no rounded-rect scene primitive,
+/// so the rounded corners are rendered into this texture.
+const FrameBuffer = struct {
+    base: wlr.Buffer,
+    pixels: []align(16) u8,
+    fw: usize,
+    fh: usize,
+    alloc: std.mem.Allocator,
+
+    /// wl_shm ARGB8888 (little-endian byte order B,G,R,A)
+    const format_argb8888: u32 = 0x34325241;
+
+    fn destroyImpl(buffer: *wlr.Buffer) callconv(.c) void {
+        const frame: *FrameBuffer = @fieldParentPtr("base", buffer);
+        frame.alloc.free(frame.pixels);
+        frame.alloc.destroy(frame);
+    }
+
+    fn beginDataPtrAccess(
+        buffer: *wlr.Buffer,
+        flags: u32,
+        data: **anyopaque,
+        format: *u32,
+        stride: *usize,
+    ) callconv(.c) bool {
+        _ = flags;
+        const frame: *FrameBuffer = @fieldParentPtr("base", buffer);
+        data.* = @ptrCast(frame.pixels.ptr);
+        format.* = format_argb8888;
+        stride.* = frame.fw * @sizeOf(u32);
+        return true;
+    }
+
+    fn endDataPtrAccess(_: *wlr.Buffer) callconv(.c) void {}
+
+    const impl: wlr.Buffer.Impl = .{
+        .destroy = destroyImpl,
+        .get_dmabuf = null,
+        .get_shm = null,
+        .begin_data_ptr_access = beginDataPtrAccess,
+        .end_data_ptr_access = endDataPtrAccess,
+    };
+
+    fn create(width: usize, height: usize) !*FrameBuffer {
+        const alloc = util.gpa;
+        const frame = try alloc.create(FrameBuffer);
+        errdefer alloc.destroy(frame);
+        frame.alloc = alloc;
+        frame.fw = width;
+        frame.fh = height;
+        frame.pixels = try alloc.alignedAlloc(u8, .@"16", width * height * @sizeOf(u32));
+        errdefer alloc.free(frame.pixels);
+        wlr.Buffer.init(&frame.base, &impl, @intCast(width), @intCast(height));
+        return frame;
+    }
+
+    /// Render the border frame into the buffer, replicating the corner
+    /// contract of the old per-edge rects: corners are drawn only between
+    /// borders on adjacent edges, and a side strip does not extend past a
+    /// missing horizontal edge.
+    fn fillFrame(
+        frame: *FrameBuffer,
+        border: *const Border,
+        content_width: usize,
+        content_height: usize,
+        clip: *const wlr.Box,
+    ) void {
+        const fw = frame.fw;
+        const fh = frame.fh;
+        const bw = border.width;
+        const frame_right = content_width + bw; // first column right of the content
+        const frame_bottom = content_height + bw; // first row below the content
+        const radius: usize = @min(@as(usize, border_radius), @min(fw, fh));
+
+        // Clip rectangle in tree coordinates. The frame is the content box
+        // expanded by the border width on each side, so shift the clip by the
+        // border width and clamp it to the frame.
+        var x0: usize = 0;
+        var x1: usize = fw;
+        var y0: usize = 0;
+        var y1: usize = fh;
+        if (!clip.empty()) {
+            const iw: i64 = @intCast(fw);
+            const ih: i64 = @intCast(fh);
+            const bwi: i64 = @intCast(bw);
+            x0 = @intCast(@min(@max(@as(i64, clip.x) + bwi, 0), iw));
+            x1 = @intCast(@min(@max(@as(i64, clip.x) + @as(i64, clip.width) + bwi, 0), iw));
+            y0 = @intCast(@min(@max(@as(i64, clip.y) + bwi, 0), ih));
+            y1 = @intCast(@min(@max(@as(i64, clip.y) + @as(i64, clip.height) + bwi, 0), ih));
+        }
+        if (x0 >= x1 or y0 >= y1) return;
+
+        @memset(frame.pixels, 0);
+
+        const color: [4]u8 = .{
+            @intCast(border.r >> 24),
+            @intCast(border.g >> 24),
+            @intCast(border.b >> 24),
+            @intCast(border.a >> 24),
+        };
+        const ctx = BorderFillContext{
+            .pixels = @ptrCast(@alignCast(frame.pixels.ptr)),
+            .fw = fw,
+            .fh = fh,
+            .bw = bw,
+            .radius = radius,
+            .frame_right = frame_right,
+            .frame_bottom = frame_bottom,
+            .edges = border.edges,
+            .color = color,
+        };
+
+        // Cover the ring in two parts: the r x r corner zones (which may
+        // overlap the strips and each other for tiny windows; the writes are
+        // idempotent) and the four strips. The strips also run into the corner
+        // zones, so a rounded corner is covered regardless of where the arc
+        // falls.
+        const r = ctx.radius;
+        fillRect(&ctx, x0, @min(x1, r), y0, @min(y1, r)); // top-left
+        fillRect(&ctx, @max(x0, fw - r), x1, y0, @min(y1, r)); // top-right
+        fillRect(&ctx, x0, @min(x1, r), @max(y0, fh - r), y1); // bottom-left
+        fillRect(&ctx, @max(x0, fw - r), x1, @max(y0, fh - r), y1); // bottom-right
+        fillRect(&ctx, x0, x1, y0, @min(y1, bw)); // top strip
+        fillRect(&ctx, x0, x1, @max(y0, fh - bw), y1); // bottom strip
+        fillRect(&ctx, x0, @min(x1, bw), y0, y1); // left strip
+        fillRect(&ctx, @max(x0, fw - bw), x1, y0, y1); // right strip
+    }
+};
+
+const BorderFillContext = struct {
+    pixels: [*]u32,
+    fw: usize,
+    fh: usize,
+    bw: usize,
+    radius: usize,
+    frame_right: usize,
+    frame_bottom: usize,
+    edges: river.WindowV1.Edges,
+    color: [4]u8,
+};
+
+/// Coverage of the pixel at (px, py) relative to a rounded corner of radius r
+/// centered r pixels from both edges: 1 = fully inside the rounded rect,
+/// 0 = fully cut away. The arc boundary is feathered over one pixel.
+fn cornerCoverage(px: usize, py: usize, r: usize) f64 {
+    const rr: f64 = @floatFromInt(r);
+    const dx = @as(f64, @floatFromInt(px)) + 0.5 - rr;
+    const dy = @as(f64, @floatFromInt(py)) + 0.5 - rr;
+    return @max(0, @min(1, rr - @sqrt(dx * dx + dy * dy) + 0.5));
+}
+
+/// Coverage of the border ring's corner band over the window corner: pixels
+/// at a distance to the arc center between r - bw and r. The band is what
+/// makes the two strips visibly join around the corner when the border is
+/// thinner than the corner radius, and it is drawn above the window content.
+fn bandCoverage(px: usize, py: usize, r: usize, bw: usize) f64 {
+    const rr: f64 = @floatFromInt(r);
+    const dx = @as(f64, @floatFromInt(px)) + 0.5 - rr;
+    const dy = @as(f64, @floatFromInt(py)) + 0.5 - rr;
+    const dist = @sqrt(dx * dx + dy * dy);
+    if (dist > rr) return 0; // trimmed away by the corner
+    if (dist < rr - @as(f64, @floatFromInt(bw))) return 0; // inside the ring's inner edge
+    return @max(0, @min(1, rr - dist + 0.5));
+}
+
+/// Ring membership and coverage of a frame pixel: returns 0 for pixels that
+/// are not part of the border ring.
+fn ringCoverage(ctx: *const BorderFillContext, px: usize, py: usize) f64 {
+    const bw = ctx.bw;
+    const r = ctx.radius;
+    const fr = ctx.frame_right;
+    const fb = ctx.frame_bottom;
+    const in_hole = px >= bw and px < fr and py >= bw and py < fb;
+    if (!in_hole) {
+        // Strips outside the content box, per the documented corner contract:
+        // a side strip only extends vertically past an edge that is drawn.
+        const y_lo: usize = if (ctx.edges.top) 0 else bw;
+        const y_hi = fb + (if (ctx.edges.bottom) bw else 0);
+        const in_left = px < bw and ctx.edges.left and py >= y_lo and py < y_hi;
+        const in_right = px >= fr and ctx.edges.right and py >= y_lo and py < y_hi;
+        const in_top = py < bw and ctx.edges.top and px >= bw and px < fr;
+        const in_bottom = py >= fb and ctx.edges.bottom and px >= bw and px < fr;
+        if (!in_left and !in_right and !in_top and !in_bottom) return 0;
+        // Round the corner where the two adjacent edges are both drawn.
+        if (ctx.edges.top and ctx.edges.left and px < r and py < r) return cornerCoverage(px, py, r);
+        if (ctx.edges.top and ctx.edges.right and px >= ctx.fw - r and py < r) return cornerCoverage(ctx.fw - 1 - px, py, r);
+        if (ctx.edges.bottom and ctx.edges.left and px < r and py >= ctx.fh - r) return cornerCoverage(px, ctx.fh - 1 - py, r);
+        if (ctx.edges.bottom and ctx.edges.right and px >= ctx.fw - r and py >= ctx.fh - r) return cornerCoverage(ctx.fw - 1 - px, ctx.fh - 1 - py, r);
+        return 1;
+    }
+    // Inside the content box, only the corner band of the ring, where both
+    // adjacent edges are drawn.
+    if (ctx.edges.top and ctx.edges.left and px < r and py < r) return bandCoverage(px, py, r, bw);
+    if (ctx.edges.top and ctx.edges.right and px >= ctx.fw - r and py < r) return bandCoverage(ctx.fw - 1 - px, py, r, bw);
+    if (ctx.edges.bottom and ctx.edges.left and px < r and py >= ctx.fh - r) return bandCoverage(px, ctx.fh - 1 - py, r, bw);
+    if (ctx.edges.bottom and ctx.edges.right and px >= ctx.fw - r and py >= ctx.fh - r) return bandCoverage(ctx.fw - 1 - px, ctx.fh - 1 - py, r, bw);
+    return 0;
+}
+
+fn fillRect(ctx: *const BorderFillContext, x0: usize, x1: usize, y0: usize, y1: usize) void {
+    const c = ctx.color;
+    var py = y0;
+    while (py < y1) : (py += 1) {
+        var px = x0;
+        while (px < x1) : (px += 1) {
+            const cov = ringCoverage(ctx, px, py);
+            if (cov == 0) continue;
+            // The border color is premultiplied per the protocol; scale by the
+            // coverage to keep the premultiplied invariant (rgb <= alpha).
+            ctx.pixels[py * ctx.fw + px] =
+                @as(u32, @intFromFloat(@round(@as(f64, c[3]) * cov))) << 24 |
+                @as(u32, @intFromFloat(@round(@as(f64, c[0]) * cov))) << 16 |
+                @as(u32, @intFromFloat(@round(@as(f64, c[1]) * cov))) << 8 |
+                @as(u32, @intFromFloat(@round(@as(f64, c[2]) * cov)));
+        }
+    }
+}
+
+
 /// Windowing state requested by the wm.
 const WmRequested = struct {
     dimensions: ?Dimensions,
@@ -190,10 +414,9 @@ decorations_below_tree: *wlr.SceneTree,
 surfaces: Scene.SaveableSurfaces,
 
 border: struct {
-    left: *wlr.SceneRect,
-    right: *wlr.SceneRect,
-    top: *wlr.SceneRect,
-    bottom: *wlr.SceneRect,
+    /// Renders the border frame as a single texture so the outer corners
+    /// can be rounded; wlroots has no rounded-rect scene primitive.
+    scene_buffer: *wlr.SceneBuffer,
 },
 
 decorations_above: wl.list.Head(Decoration, .link),
@@ -295,10 +518,7 @@ pub fn create(impl: Impl) error{OutOfMemory}!*Window {
         .decorations_below_tree = try tree.createSceneTree(),
         .surfaces = try Scene.SaveableSurfaces.init(tree),
         .border = .{
-            .left = try tree.createSceneRect(0, 0, &.{ 0, 0, 0, 0 }),
-            .right = try tree.createSceneRect(0, 0, &.{ 0, 0, 0, 0 }),
-            .top = try tree.createSceneRect(0, 0, &.{ 0, 0, 0, 0 }),
-            .bottom = try tree.createSceneRect(0, 0, &.{ 0, 0, 0, 0 }),
+            .scene_buffer = try tree.createSceneBuffer(null),
         },
         .decorations_above = undefined,
         .decorations_above_tree = try tree.createSceneTree(),
@@ -948,9 +1168,7 @@ pub fn renderFinish(window: *Window) void {
         window.fullscreen_background.setSize(width, height);
         clip = .{ .x = 0, .y = 0, .width = width, .height = height };
         content_clip = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
-        inline for (.{ "left", "right", "top", "bottom" }) |edge| {
-            @field(window.border, edge).node.setEnabled(false);
-        }
+        window.border.scene_buffer.node.setEnabled(false);
     } else {
         window.box.x = requested.x;
         window.box.y = requested.y;
@@ -986,89 +1204,57 @@ pub fn renderFinish(window: *Window) void {
 
 fn drawBorders(window: *Window) void {
     const requested = &window.rendering_requested;
-    var content: wlr.Box = .{
+    const border = &requested.border;
+    const content_width: usize = @intCast(window.box.width);
+    const content_height: usize = @intCast(window.box.height);
+    const border_width = border.width;
+    const edges = border.edges;
+
+    // Mirror the old behavior: while the content is fully clipped away (e.g.
+    // a closing animation), draw no borders either.
+    var content_box: wlr.Box = .{
         .x = 0,
         .y = 0,
         .width = window.box.width,
         .height = window.box.height,
     };
-    if (requested.content_clip.empty() or
-        content.intersection(&content, &requested.content_clip))
+    if (!requested.content_clip.empty() and
+        !content_box.intersection(&content_box, &requested.content_clip))
     {
-        // f32 cannot represent all u32 values exactly, therefore we must initially use f64
-        // (which can) and then cast to f32, potentially losing precision.
-        const border = &requested.border;
-        const color: [4]f32 = .{
-            @floatCast(@as(f64, @floatFromInt(border.r)) / math.maxInt(u32)),
-            @floatCast(@as(f64, @floatFromInt(border.g)) / math.maxInt(u32)),
-            @floatCast(@as(f64, @floatFromInt(border.b)) / math.maxInt(u32)),
-            @floatCast(@as(f64, @floatFromInt(border.a)) / math.maxInt(u32)),
-        };
-        var left: wlr.Box = .{
-            .x = -@as(i32, border.width),
-            .y = 0,
-            .width = border.width,
-            .height = content.height,
-        };
-        var right: wlr.Box = .{
-            .x = content.width,
-            .y = 0,
-            .width = border.width,
-            .height = content.height,
-        };
-        var top: wlr.Box = .{
-            .x = 0,
-            .y = -@as(i32, border.width),
-            .width = content.width,
-            .height = border.width,
-        };
-        var bottom: wlr.Box = .{
-            .x = 0,
-            .y = content.height,
-            .width = content.width,
-            .height = border.width,
-        };
-        // Use left and right scene rects to draw the corners if needed
-        if (border.edges.top) {
-            left.y -= border.width;
-            left.height += border.width;
-            right.y -= border.width;
-            right.height += border.width;
-        }
-        if (border.edges.bottom) {
-            left.height += border.width;
-            right.height += border.width;
-        }
-        inline for (.{
-            .{ .name = "left", .box = &left },
-            .{ .name = "right", .box = &right },
-            .{ .name = "top", .box = &top },
-            .{ .name = "bottom", .box = &bottom },
-        }) |edge| {
-            if (!requested.clip.empty()) {
-                _ = edge.box.intersection(edge.box, &requested.clip);
-            }
-            const rect = @field(window.border, edge.name);
-            // Workaround a Zig 0.16 LLVM backend miscompilation when passing a boolean member
-            // of a packed struct to an extern function:
-            // https://codeberg.org/ziglang/zig/issues/35373
-            //
-            // The only "safe" option in the presence of optimizations appears to be calling
-            // the extern function with a constant value that does not depend on the bool we
-            // actually want to pass. Luckily, we can use setSize(0,0) as a substitute for
-            // disabling the node.
-            // TODO(zig) remove workaround when updating to Zig 0.17
-            rect.node.setEnabled(true);
-            if (@field(border.edges, edge.name)) {
-                rect.setSize(edge.box.width, edge.box.height);
-            } else {
-                rect.setSize(0, 0);
-            }
-            rect.node.setPosition(edge.box.x, edge.box.y);
-            rect.setColor(&color);
-        }
+        window.border.scene_buffer.setBuffer(null);
+        window.border.scene_buffer.node.setEnabled(false);
+        return;
     }
+
+    if (border_width == 0 or content_width == 0 or content_height == 0 or
+        (!edges.top and !edges.bottom and !edges.left and !edges.right))
+    {
+        window.border.scene_buffer.setBuffer(null);
+        window.border.scene_buffer.node.setEnabled(false);
+        return;
+    }
+
+    const frame_width = content_width + 2 * border_width;
+    const frame_height = content_height + 2 * border_width;
+    // wlroots stores buffer sizes as c_int.
+    if (frame_width > math.maxInt(c_int) or frame_height > math.maxInt(c_int)) {
+        window.border.scene_buffer.setBuffer(null);
+        window.border.scene_buffer.node.setEnabled(false);
+        return;
+    }
+
+    const frame = FrameBuffer.create(frame_width, frame_height) catch {
+        std.log.err("out of memory drawing window borders", .{});
+        return;
+    };
+    frame.fillFrame(border, content_width, content_height, &requested.clip);
+    window.border.scene_buffer.node.setPosition(-@as(c_int, border_width), -@as(c_int, border_width));
+    window.border.scene_buffer.setBuffer(&frame.base);
+    // The scene buffer holds the one remaining reference to the frame.
+    frame.base.drop();
+    window.border.scene_buffer.node.setEnabled(true);
 }
+
 
 fn applySurfaceClip(window: *Window, a: *const wlr.Box, b: *const wlr.Box) void {
     var surface_clip: wlr.Box = undefined;
@@ -1249,4 +1435,41 @@ pub fn notifyAppId(window: *Window) void {
     if (window.wlr_toplevel_handle) |handle| {
         if (window.getAppId()) |app_id| handle.setAppId(app_id);
     }
+}
+
+test "rounded border corner coverage" {
+    const testing = std.testing;
+    // Fully outside the corner arc is cut away.
+    try testing.expectEqual(@as(f64, 0), cornerCoverage(0, 0, 10));
+    // Deep inside the border region is fully covered.
+    try testing.expectEqual(@as(f64, 1), cornerCoverage(9, 9, 10));
+    // The arc boundary is feathered over about one pixel.
+    const partial = cornerCoverage(2, 3, 10);
+    try testing.expect(partial > 0 and partial < 1);
+}
+
+test "border ring corner band spans the content corner" {
+    const testing = std.testing;
+    // W=50 H=30, bw=2, r=10 -> frame 54x34; content box [2,52)x[2,32).
+    const ctx = BorderFillContext{
+        .pixels = @ptrFromInt(0x1000),
+        .fw = 54,
+        .fh = 34,
+        .bw = 2,
+        .radius = 10,
+        .frame_right = 52,
+        .frame_bottom = 32,
+        .edges = .{ .top = true, .bottom = true, .left = true, .right = true },
+        .color = .{ 255, 255, 255, 255 },
+    };
+    // The arc band crosses the content corner, joining the strips.
+    try testing.expect(ringCoverage(&ctx, 3, 3) > 0);
+    // Deep inside the content corner (inside the ring's inner edge) is empty.
+    try testing.expectEqual(@as(f64, 0), ringCoverage(&ctx, 5, 5));
+    // The very corner is trimmed by the arc.
+    try testing.expectEqual(@as(f64, 0), ringCoverage(&ctx, 0, 0));
+    // Straight strip parts are solid.
+    try testing.expectEqual(@as(f64, 1), ringCoverage(&ctx, 1, 20));
+    // Inside the content box away from a corner there is no border.
+    try testing.expectEqual(@as(f64, 0), ringCoverage(&ctx, 20, 20));
 }

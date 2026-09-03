@@ -98,29 +98,43 @@ pub const AtResult = struct {
 pub fn at(scene: *const Scene, lx: f64, ly: f64) ?AtResult {
     var sx: f64 = undefined;
     var sy: f64 = undefined;
-    const node = scene.interactive_tree.node.at(lx, ly, &sx, &sy) orelse return null;
+    var node = scene.interactive_tree.node.at(lx, ly, &sx, &sy) orelse return null;
 
-    const surface: ?*wlr.Surface = blk: {
-        if (node.type == .buffer) {
-            const scene_buffer = wlr.SceneBuffer.fromNode(node);
-            if (wlr.SceneSurface.tryFromBuffer(scene_buffer)) |scene_surface| {
-                break :blk scene_surface.surface;
-            }
+    const scene_node_data = SceneNodeData.fromNode(node) orelse return null;
+
+    // A window's border texture covers the entire window box, but its interior
+    // is transparent. When the hit is over the window content, resolve the
+    // surface from the content subtree instead, so that pointer interactions
+    // reach the window contents rather than the border node.
+    var surface: ?*wlr.Surface = sceneSurfaceOf(node);
+    if (surface == null) {
+        switch (scene_node_data.data) {
+            .window => |window| {
+                if (window.surfaces.tree.node.at(lx, ly, &sx, &sy)) |content_node| {
+                    node = content_node;
+                    surface = sceneSurfaceOf(content_node);
+                }
+            },
+            else => {},
         }
-        break :blk null;
-    };
-
-    if (SceneNodeData.fromNode(node)) |scene_node_data| {
-        return .{
-            .node = node,
-            .surface = surface,
-            .sx = sx,
-            .sy = sy,
-            .data = scene_node_data.data,
-        };
-    } else {
-        return null;
     }
+
+    return .{
+        .node = node,
+        .surface = surface,
+        .sx = sx,
+        .sy = sy,
+        .data = scene_node_data.data,
+    };
+}
+
+fn sceneSurfaceOf(node: *wlr.SceneNode) ?*wlr.Surface {
+    if (node.type != .buffer) return null;
+    const scene_buffer = wlr.SceneBuffer.fromNode(node);
+    if (wlr.SceneSurface.tryFromBuffer(scene_buffer)) |scene_surface| {
+        return scene_surface.surface;
+    }
+    return null;
 }
 
 pub fn layerSurfaceTree(scene: *Scene, layer: zwlr.LayerShellV1.Layer) *wlr.SceneTree {
