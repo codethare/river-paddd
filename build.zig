@@ -86,6 +86,7 @@ pub fn build(b: *Build) !void {
     scanner.addSystemProtocol("unstable/pointer-gestures/pointer-gestures-unstable-v1.xml");
     scanner.addSystemProtocol("unstable/xdg-decoration/xdg-decoration-unstable-v1.xml");
     scanner.addSystemProtocol("unstable/xdg-foreign/xdg-foreign-unstable-v2.xml");
+    scanner.addSystemProtocol("staging/ext-transient-seat/ext-transient-seat-v1.xml");
 
     scanner.addCustomProtocol(b.path("protocol/river-window-management-v1.xml"));
     scanner.addCustomProtocol(b.path("protocol/river-xkb-bindings-v1.xml"));
@@ -118,6 +119,7 @@ pub fn build(b: *Build) !void {
     scanner.generate("zxdg_importer_v2", 1);
     scanner.generate("zxdg_exporter_v2", 1);
     scanner.generate("ext_session_lock_manager_v1", 1);
+    scanner.generate("ext_transient_seat_manager_v1", 1);
     scanner.generate("wp_cursor_shape_manager_v1", 1);
     scanner.generate("wp_tearing_control_manager_v1", 1);
     scanner.generate("wp_color_manager_v1", 2);

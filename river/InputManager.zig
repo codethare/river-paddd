@@ -20,6 +20,7 @@ const Keyboard = @import("Keyboard.zig");
 const PointerConstraint = @import("PointerConstraint.zig");
 const Seat = @import("Seat.zig");
 const TextInput = @import("TextInput.zig");
+const TransientSeatManager = @import("TransientSeatManager.zig");
 
 const default_seat_name = "default";
 
@@ -39,6 +40,7 @@ pointer_constraints: *wlr.PointerConstraintsV1,
 input_method_manager: *wlr.InputMethodManagerV2,
 text_input_manager: *wlr.TextInputManagerV3,
 tablet_manager: *wlr.TabletManagerV2,
+transient_seat_manager: TransientSeatManager,
 
 devices: wl.list.Head(InputDevice, .link),
 seats: wl.list.Head(Seat, .link),
@@ -66,12 +68,14 @@ pub fn init(input_manager: *InputManager) !void {
         .objects = undefined,
         .devices = undefined,
         .seats = undefined,
+        .transient_seat_manager = undefined,
     };
     input_manager.objects.init();
     input_manager.devices.init();
     input_manager.seats.init();
+    try input_manager.transient_seat_manager.init();
 
-    try Seat.create(default_seat_name);
+    try Seat.create(default_seat_name, null);
 
     if (build_options.xwayland) {
         if (server.xwayland) |xwayland| {
@@ -103,6 +107,8 @@ pub fn deinit(input_manager: *InputManager) void {
     while (input_manager.seats.first()) |seat| {
         seat.destroy();
     }
+
+    input_manager.transient_seat_manager.deinit();
 }
 
 fn bind(client: *wl.Client, im: *InputManager, version: u32, id: u32) void {
@@ -156,7 +162,7 @@ fn handleRequest(
                     break;
                 }
             } else {
-                Seat.create(args.name) catch |err| switch (err) {
+                Seat.create(args.name, null) catch |err| switch (err) {
                     error.OutOfMemory => {
                         im_v1.getClient().postNoMemory();
                         log.err("out of memory", .{});

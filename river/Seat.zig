@@ -11,6 +11,7 @@ const wlr = @import("wlroots");
 const wayland = @import("wayland");
 const wl = wayland.server.wl;
 const river = wayland.server.river;
+const ext = wayland.server.ext;
 const xkb = @import("xkbcommon");
 
 const server = &@import("main.zig").server;
@@ -240,13 +241,14 @@ drag: enum {
     touch,
 } = .none,
 
+transient: ?*ext.TransientSeatV1 = null,
 request_set_selection: wl.Listener(*wlr.Seat.event.RequestSetSelection) = .init(handleRequestSetSelection),
 request_start_drag: wl.Listener(*wlr.Seat.event.RequestStartDrag) = .init(handleRequestStartDrag),
 start_drag: wl.Listener(*wlr.Drag) = .init(handleStartDrag),
 drag_destroy: wl.Listener(*wlr.Drag) = .init(handleDragDestroy),
 request_set_primary_selection: wl.Listener(*wlr.Seat.event.RequestSetPrimarySelection) = .init(handleRequestSetPrimarySelection),
 
-pub fn create(name: [*:0]const u8) !void {
+pub fn create(name: [*:0]const u8, transient: ?*ext.TransientSeatV1) !void {
     const seat = try util.gpa.create(Seat);
     errdefer util.gpa.destroy(seat);
 
@@ -265,6 +267,7 @@ pub fn create(name: [*:0]const u8) !void {
         .cursor = undefined,
         .relay = undefined,
         .keyboard_groups = undefined,
+        .transient = transient,
     };
     seat.wlr_seat.data = seat;
 
@@ -432,6 +435,8 @@ pub fn manageStart(seat: *Seat) void {
         if (new) {
             seat_v1.sendWlSeat(seat.wlr_seat.global.getName(seat_v1.getClient()));
         }
+
+        if (new) if (seat.transient) |ts| ts.sendReady(seat.wlr_seat.global.getName(ts.getClient()));
 
         if (new) {
             if (seat.wm_scheduled.hovered) |ref| {
