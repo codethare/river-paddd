@@ -64,10 +64,8 @@ pub const Border = struct {
     a: u32 = 0,
 };
 
-/// Base radius in pixels of the rounded corners drawn on window borders; the
-/// effective radius is this plus the border width, so the rounding stays
-/// visible however thick the border is configured. Compositor-side value, see
-/// SPEC-rounded-window-borders.md.
+/// Radius in pixels of the rounded corners drawn on window borders.
+/// Fixed compositor-side value, see SPEC-rounded-window-borders.md.
 const border_radius: u31 = 10;
 
 /// A premultiplied ARGB8888 image of a window's border frame, uploaded to the
@@ -143,11 +141,13 @@ const FrameBuffer = struct {
         const bw = border.width;
         const frame_right = content_width + bw; // first column right of the content
         const frame_bottom = content_height + bw; // first row below the content
-        // The corner radius grows with the border width, so the rounding stays
-        // visible no matter how thick the border is configured to be.
+        // The scene graph cannot clip client content to a rounded rect, so
+        // the effective radius is bounded by the border width: the content's
+        // square corner stays inside the arc as long as
+        // r <= (bw + 0.5) * (2 + sqrt(2)).
         const radius: usize = @min(
-            @as(usize, border_radius) + border.width,
-            @min(fw, fh),
+            @as(usize, border_radius),
+            @min(@min(fw, fh), overflowFreeRadius(bw)),
         );
 
         // Clip rectangle in tree coordinates. The frame is the content box
@@ -216,6 +216,14 @@ const BorderFillContext = struct {
     edges: river.WindowV1.Edges,
     color: [4]u8,
 };
+
+/// Largest corner radius (pixels) for a border of the given width that keeps
+/// the content's square corners inside the arc, so no content pokes out of
+/// the rounded outline: (bw + 0.5) * (2 + sqrt(2)).
+fn overflowFreeRadius(bw: usize) usize {
+    const max = (@as(f64, @floatFromInt(bw)) + 0.5) * (2.0 + @sqrt(2.0));
+    return @intFromFloat(@floor(max));
+}
 
 /// Coverage of the pixel at (px, py) relative to a rounded corner of radius r
 /// centered r pixels from both edges: 1 = fully inside the rounded rect,
@@ -1493,6 +1501,10 @@ test "rounded border corner coverage" {
     // The arc boundary is feathered over about one pixel.
     const partial = cornerCoverage(2, 3, 10);
     try testing.expect(partial > 0 and partial < 1);
+    // The overflow-free radius bound keeps content corners inside the arc.
+    try testing.expectEqual(@as(usize, 5), overflowFreeRadius(1));
+    try testing.expectEqual(@as(usize, 8), overflowFreeRadius(2));
+    try testing.expectEqual(@as(usize, 11), overflowFreeRadius(3));
 }
 
 test "border ring corner band spans the content corner" {

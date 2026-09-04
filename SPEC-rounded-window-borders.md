@@ -25,6 +25,8 @@
   - 像素预乘 alpha(与 wlroots 混合模式一致,保证半透明边框颜色正确)。
 - 上屏:自定义 `wlr.Buffer`(实现 `wlr_buffer_impl` 的 `get_shm` / `begin_data_ptr_access`,zig-wlroots 的 `wlr.Buffer.init` 已可用),`wlr_scene_buffer_set_buffer` 接替或重建;每次 `drawBorders()`(颜色/宽度/尺寸/edges 变化时)重填纹理。边框面积 ≈ 周长×bw,开销可忽略。
 - 裁剪兼容:现有每边 rect 与 `requested.clip` 的矩形求交改为 CPU 填充时跳过 clip 外像素(同一坐标空间)。
+- 内容不溢出:wlroots 0.20 场景图无法对客户端内容做圆角裁剪(只有矩形 clip),因此有效半径按边框宽度收敛:
+  `r_eff = min(10, floor((bw + 0.5)·(2+√2)))`,保证内容方角保持在圆弧内侧(如 bw=2 → r=8)。
 - edges 位掩码(平铺窗口只画部分边):按已画边生成对应边条;圆角仅出现在两条相邻边都存在的角。
 - 全屏/无边框窗口(`width=0` 或不画边):纹理尺寸为 0 或禁用节点,与现状等价。
 

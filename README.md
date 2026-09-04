@@ -42,9 +42,10 @@ window manager (or riverctl binding) can bind them like ordinary keysyms. The
 mapping lives in `river/gesture_config.zig`; see `route-a-gesture-patch-plan.md`
 for the design rationale.
 
-Window borders are drawn with rounded outer corners (the corner radius grows
-with the border width, 10px + width), see `SPEC-rounded-window-borders.md`
-for the design rationale.
+Window borders are drawn with rounded outer corners (radius up to 10px,
+clamped per window so the square content corners stay inside the arc, drawn
+from a CPU-rendered frame texture), see `SPEC-rounded-window-borders.md` for
+the design rationale.
 
 ## Links
 
