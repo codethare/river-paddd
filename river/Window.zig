@@ -419,6 +419,21 @@ border: struct {
     scene_buffer: *wlr.SceneBuffer,
 },
 
+/// Inputs of the last border frame texture, so drawBorders() can skip the
+/// render and upload work on render sequences where nothing changed.
+border_rendered: struct {
+    valid: bool = false,
+    width: u31 = 0,
+    r: u32 = 0,
+    g: u32 = 0,
+    b: u32 = 0,
+    a: u32 = 0,
+    edges: u32 = 0,
+    content_width: u31 = 0,
+    content_height: u31 = 0,
+    clip: wlr.Box = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+} = .{},
+
 decorations_above: wl.list.Head(Decoration, .link),
 decorations_above_tree: *wlr.SceneTree,
 
@@ -1209,6 +1224,8 @@ fn drawBorders(window: *Window) void {
     const content_height: usize = @intCast(window.box.height);
     const border_width = border.width;
     const edges = border.edges;
+    const drawable = border_width != 0 and content_width != 0 and content_height != 0 and
+        (edges.top or edges.bottom or edges.left or edges.right);
 
     // Mirror the old behavior: while the content is fully clipped away (e.g.
     // a closing animation), draw no borders either.
@@ -1218,19 +1235,30 @@ fn drawBorders(window: *Window) void {
         .width = window.box.width,
         .height = window.box.height,
     };
-    if (!requested.content_clip.empty() and
-        !content_box.intersection(&content_box, &requested.content_clip))
-    {
+    const fully_clipped = !requested.content_clip.empty() and
+        !content_box.intersection(&content_box, &requested.content_clip);
+
+    if (!drawable or fully_clipped) {
+        window.border_rendered.valid = false;
         window.border.scene_buffer.setBuffer(null);
         window.border.scene_buffer.node.setEnabled(false);
         return;
     }
 
-    if (border_width == 0 or content_width == 0 or content_height == 0 or
-        (!edges.top and !edges.bottom and !edges.left and !edges.right))
+    // Skip the render and upload when nothing changed since the last render
+    // sequence (this function runs for every window on every sequence).
+    const cached = &window.border_rendered;
+    if (cached.valid and cached.width == border.width and
+        cached.r == border.r and cached.g == border.g and
+        cached.b == border.b and cached.a == border.a and
+        cached.edges == @as(u32, @bitCast(edges)) and
+        cached.content_width == content_width and
+        cached.content_height == content_height and
+        cached.clip.x == requested.clip.x and cached.clip.y == requested.clip.y and
+        cached.clip.width == requested.clip.width and cached.clip.height == requested.clip.height)
     {
-        window.border.scene_buffer.setBuffer(null);
-        window.border.scene_buffer.node.setEnabled(false);
+        // Re-enable in case the node was disabled while fullscreen.
+        window.border.scene_buffer.node.setEnabled(true);
         return;
     }
 
@@ -1238,6 +1266,7 @@ fn drawBorders(window: *Window) void {
     const frame_height = content_height + 2 * border_width;
     // wlroots stores buffer sizes as c_int.
     if (frame_width > math.maxInt(c_int) or frame_height > math.maxInt(c_int)) {
+        window.border_rendered.valid = false;
         window.border.scene_buffer.setBuffer(null);
         window.border.scene_buffer.node.setEnabled(false);
         return;
@@ -1253,6 +1282,19 @@ fn drawBorders(window: *Window) void {
     // The scene buffer holds the one remaining reference to the frame.
     frame.base.drop();
     window.border.scene_buffer.node.setEnabled(true);
+
+    cached.* = .{
+        .valid = true,
+        .width = border.width,
+        .r = border.r,
+        .g = border.g,
+        .b = border.b,
+        .a = border.a,
+        .edges = @as(u32, @bitCast(edges)),
+        .content_width = @intCast(content_width),
+        .content_height = @intCast(content_height),
+        .clip = requested.clip,
+    };
 }
 
 
