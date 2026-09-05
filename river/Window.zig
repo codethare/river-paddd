@@ -64,8 +64,10 @@ pub const Border = struct {
     a: u32 = 0,
 };
 
-/// Radius in pixels of the rounded corners drawn on window borders.
-/// Fixed compositor-side value, see SPEC-rounded-window-borders.md.
+/// Base radius in pixels of the rounded corners drawn on window borders; the
+/// effective radius is this plus the border width, so the rounding stays
+/// visible however thick the border is configured. Compositor-side value, see
+/// SPEC-rounded-window-borders.md.
 const border_radius: u31 = 10;
 
 /// A premultiplied ARGB8888 image of a window's border frame, uploaded to the
@@ -141,7 +143,12 @@ const FrameBuffer = struct {
         const bw = border.width;
         const frame_right = content_width + bw; // first column right of the content
         const frame_bottom = content_height + bw; // first row below the content
-        const radius: usize = @min(@as(usize, border_radius), @min(fw, fh));
+    // The corner radius grows with the border width, so the rounding stays
+    // visible no matter how thick the border is configured to be.
+    const radius: usize = @min(
+        @as(usize, border_radius) + border.width,
+        @min(fw, fh),
+    );
 
         // Clip rectangle in tree coordinates. The frame is the content box
         // expanded by the border width on each side, so shift the clip by the
