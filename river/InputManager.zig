@@ -210,16 +210,19 @@ fn handleNewVirtualPointer(
 ) void {
     const input_manager: *InputManager = @fieldParentPtr("new_virtual_pointer", listener);
 
-    // TODO Support multiple seats and don't ignore
-    if (event.suggested_seat != null) {
-        log.debug("Ignoring seat suggestion from virtual pointer", .{});
-    }
+    const seat: *Seat = blk: {
+        if (event.suggested_seat) |wlr_seat| {
+            break :blk @ptrCast(@alignCast(wlr_seat.data));
+        } else {
+            break :blk input_manager.defaultSeat();
+        }
+    };
     // TODO dont ignore output suggestion
     if (event.suggested_output != null) {
         log.debug("Ignoring output suggestion from virtual pointer", .{});
     }
 
-    input_manager.defaultSeat().attachNewDevice(&event.new_pointer.pointer.base, true);
+    seat.attachNewDevice(&event.new_pointer.pointer.base, true);
 }
 
 fn handleNewVirtualKeyboard(
