@@ -287,6 +287,8 @@ pub fn create(name: [*:0]const u8, transient: ?*ext.TransientSeatV1) !void {
     seat.wlr_seat.events.request_start_drag.add(&seat.request_start_drag);
     seat.wlr_seat.events.start_drag.add(&seat.start_drag);
     seat.wlr_seat.events.request_set_primary_selection.add(&seat.request_set_primary_selection);
+
+    log.debug("created new seat {s}", .{name});
 }
 
 pub fn destroy(seat: *Seat) void {
