@@ -69,7 +69,7 @@ fn handleRequest(object: *ext.TransientSeatManagerV1, req: ext.TransientSeatMana
                 // If the name is already taken, try the next one.
                 // It should be impossible for 2^32 transient seats to exist without the system running out of memory.
                 var it = server.input_manager.seats.safeIterator(.forward);
-                while (it.next()) |seat| if (mem.orderZ(u8, seat.wlr_seat.name, name) == .eq) continue;
+                while (it.next()) |seat| if (mem.orderZ(u8, seat.wlr_seat.name, name) == .eq) continue :name;
 
                 break :name name;
             };
