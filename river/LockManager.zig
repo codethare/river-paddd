@@ -117,7 +117,11 @@ fn handleLock(listener: *wl.Listener(*wlr.SessionLockV1), lock: *wlr.SessionLock
 
 fn handleLockSurfacesTimeout(manager: *LockManager) c_int {
     log.err("waiting for lock surfaces timed out, imperfect frames may be shown", .{});
+    manager.waitForBlank();
+    return 0;
+}
 
+fn waitForBlank(manager: *LockManager) void {
     assert(manager.state == .waiting_for_lock_surfaces);
     manager.state = .waiting_for_blank;
 
@@ -125,8 +129,6 @@ fn handleLockSurfacesTimeout(manager: *LockManager) c_int {
 
     // This call is necessary in the case that all outputs in the layout are disabled.
     manager.maybeLock();
-
-    return 0;
 }
 
 pub fn maybeLock(manager: *LockManager) void {
@@ -208,8 +210,8 @@ fn handleDestroy(listener: *wl.Listener(void)) void {
 
     manager.lock = null;
     if (manager.state == .waiting_for_lock_surfaces) {
-        manager.state = .waiting_for_blank;
         manager.lock_surfaces_timer.timerUpdate(0) catch {};
+        manager.waitForBlank();
     }
 }
 
