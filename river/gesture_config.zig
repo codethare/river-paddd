@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: © 2026 codethare
 // SPDX-License-Identifier: GPL-3.0-only
 
-/// Configuration and pure logic for touchpad swipe → key injection.
+/// Configuration and pure logic for touchpad gesture → key injection.
 ///
 /// Bindings are matched by keysym directly (see Seat.injectGestureKey), so the
 /// reserved keysyms do not need to exist in any client keymap.
@@ -62,6 +62,23 @@ pub const reserved = [2][4]?xkb.Keysym{
     .{ .F5, .F6, .F7, .F8 },
 };
 
+/// Keysyms pressed while a 3/4-finger hold is active, indexed by fingerIndex;
+/// the key is released at hold_end (sustained command):
+/// 3 fingers: F9, 4 fingers: F10.
+pub const hold_reserved = [2]?xkb.Keysym{ .F9, .F10 };
+
+/// Keysyms for a 3/4-finger pinch-in, indexed by fingerIndex:
+/// 3 fingers: F11, 4 fingers: F12. Pinch-out is consumed but not mapped.
+pub const pinch_reserved = [2]?xkb.Keysym{ .F11, .F12 };
+
+/// Accumulated gesture scale below which a pinch counts as pinch-in.
+const min_scale_delta = 0.05;
+
+/// True when the accumulated scale is a deliberate pinch-in (捏合).
+pub fn isPinchIn(scale: f64) bool {
+    return scale <= 1.0 - min_scale_delta;
+}
+
 test "finger index, direction resolution and reserved table" {
     const testing = std.testing;
 
@@ -86,4 +103,14 @@ test "finger index, direction resolution and reserved table" {
     try testing.expectEqual(xkb.Keysym.F6, reserved[1][@intFromEnum(Direction.down)].?);
     try testing.expectEqual(xkb.Keysym.F7, reserved[1][@intFromEnum(Direction.left)].?);
     try testing.expectEqual(xkb.Keysym.F8, reserved[1][@intFromEnum(Direction.right)].?);
+
+    try testing.expectEqual(xkb.Keysym.F9, hold_reserved[0].?);
+    try testing.expectEqual(xkb.Keysym.F10, hold_reserved[1].?);
+    try testing.expectEqual(xkb.Keysym.F11, pinch_reserved[0].?);
+    try testing.expectEqual(xkb.Keysym.F12, pinch_reserved[1].?);
+
+    try testing.expect(isPinchIn(0.8));
+    try testing.expect(!isPinchIn(1.0));
+    try testing.expect(!isPinchIn(1.1));
+    try testing.expect(!isPinchIn(0.98));
 }

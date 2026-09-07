@@ -221,8 +221,21 @@ swipe: struct {
     dy: f64 = 0,
 } = .{},
 
+/// An in-progress touchpad hold taken over for sustained key injection
+/// (fingers != 0). The held key stays pressed until hold_end.
+hold: struct {
+    fingers: u32 = 0,
+} = .{},
+
+/// An in-progress touchpad pinch taken over for key injection (fingers != 0).
+pinch: struct {
+    fingers: u32 = 0,
+    scale: f64 = 1,
+} = .{},
+
 /// A gesture key press already sent to the window manager; the release is
-/// injected at the start of the next processEvents() pump, after the press ack.
+/// sent once the press has been acked — at the start of the next pump for
+/// swipes/pinches, or at hold_end for holds.
 pending_gesture_release: ?*XkbBinding = null,
 
 xkb_bindings: wl.list.Head(XkbBinding, .link),
@@ -381,11 +394,10 @@ pub fn processEvents(seat: *Seat) void {
     assert(server.wm.state == .idle);
 
     // A gesture key press was sent to the window manager on a previous pump;
-    // send the release now that the press has been acked, before any new events.
-    if (seat.pending_gesture_release) |binding| {
-        seat.pending_gesture_release = null;
-        binding.stopRepeat();
-        binding.released();
+    // send the release now that the press has been acked. A held key is not
+    // flushed here: it stays pressed until hold_end releases it.
+    if (seat.hold.fingers == 0) {
+        seat.releaseGestureKey();
     }
 
     // Only process events while there is no new state to be sent to the window manager.
@@ -396,7 +408,6 @@ pub fn processEvents(seat: *Seat) void {
 
         const event = seat.event_queue.popFront() orelse break;
 
-        const pg = server.input_manager.pointer_gestures;
         switch (event) {
             .keyboard_key => |ev| ev.keyboard.processKey(&ev.key),
             .keyboard_modifiers => |ev| ev.keyboard.processModifiers(ev.modifiers),
@@ -412,12 +423,12 @@ pub fn processEvents(seat: *Seat) void {
             .pointer_swipe_update => |ev| seat.handleSwipeUpdate(ev),
             .pointer_swipe_end => |ev| seat.handleSwipeEnd(ev),
 
-            .pointer_pinch_begin => |ev| pg.sendPinchBegin(seat.wlr_seat, ev.time_msec, ev.fingers),
-            .pointer_pinch_update => |ev| pg.sendPinchUpdate(seat.wlr_seat, ev.time_msec, ev.dx, ev.dy, ev.scale, ev.rotation),
-            .pointer_pinch_end => |ev| pg.sendPinchEnd(seat.wlr_seat, ev.time_msec, ev.cancelled),
+            .pointer_pinch_begin => |ev| seat.handlePinchBegin(ev),
+            .pointer_pinch_update => |ev| seat.handlePinchUpdate(ev),
+            .pointer_pinch_end => |ev| seat.handlePinchEnd(ev),
 
-            .pointer_hold_begin => |ev| pg.sendHoldBegin(seat.wlr_seat, ev.time_msec, ev.fingers),
-            .pointer_hold_end => |ev| pg.sendHoldEnd(seat.wlr_seat, ev.time_msec, ev.cancelled),
+            .pointer_hold_begin => |ev| seat.handleHoldBegin(ev),
+            .pointer_hold_end => |ev| seat.handleHoldEnd(ev),
         }
     }
     assert(server.wm.state == .idle);
@@ -458,6 +469,80 @@ fn handleSwipeEnd(seat: *Seat, ev: Event.PointerSwipeEnd) void {
     const direction = GestureConfig.resolveDirection(dx, dy, seat.naturalScroll()) orelse return;
     if (GestureConfig.reserved[fingers_index][@intFromEnum(direction)]) |keysym| {
         seat.injectGestureKey(keysym);
+    }
+}
+
+fn handlePinchBegin(seat: *Seat, ev: Event.PointerPinchBegin) void {
+    if (GestureConfig.enabled and GestureConfig.fingerIndex(ev.fingers) != null) {
+        seat.pinch = .{ .fingers = ev.fingers };
+    } else {
+        server.input_manager.pointer_gestures.sendPinchBegin(seat.wlr_seat, ev.time_msec, ev.fingers);
+    }
+}
+
+fn handlePinchUpdate(seat: *Seat, ev: Event.PointerPinchUpdate) void {
+    if (seat.pinch.fingers != 0) {
+        // libinput scales are relative to the previous event, so multiply.
+        seat.pinch.scale *= ev.scale;
+    } else {
+        server.input_manager.pointer_gestures.sendPinchUpdate(seat.wlr_seat, ev.time_msec, ev.dx, ev.dy, ev.scale, ev.rotation);
+    }
+}
+
+fn handlePinchEnd(seat: *Seat, ev: Event.PointerPinchEnd) void {
+    const fingers = seat.pinch.fingers;
+    const scale = seat.pinch.scale;
+    seat.pinch = .{};
+
+    if (fingers == 0) {
+        server.input_manager.pointer_gestures.sendPinchEnd(seat.wlr_seat, ev.time_msec, ev.cancelled);
+        return;
+    }
+    if (ev.cancelled) return;
+
+    // Pinch-in only (捏合); pinch-out and sub-threshold pinches are consumed
+    // without firing.
+    if (!GestureConfig.isPinchIn(scale)) return;
+
+    const fingers_index = GestureConfig.fingerIndex(fingers) orelse return;
+    if (GestureConfig.pinch_reserved[fingers_index]) |keysym| {
+        seat.injectGestureKey(keysym);
+    }
+}
+
+fn handleHoldBegin(seat: *Seat, ev: Event.PointerHoldBegin) void {
+    if (GestureConfig.enabled and GestureConfig.fingerIndex(ev.fingers) != null) {
+        // A second simultaneous hold (multi-touchpad) ends the first cleanly.
+        if (seat.hold.fingers != 0) seat.releaseGestureKey();
+        seat.hold = .{ .fingers = ev.fingers };
+        if (GestureConfig.hold_reserved[GestureConfig.fingerIndex(ev.fingers).?]) |keysym| {
+            seat.injectGestureKey(keysym);
+        }
+    } else {
+        server.input_manager.pointer_gestures.sendHoldBegin(seat.wlr_seat, ev.time_msec, ev.fingers);
+    }
+}
+
+fn handleHoldEnd(seat: *Seat, ev: Event.PointerHoldEnd) void {
+    const fingers = seat.hold.fingers;
+    seat.hold = .{};
+
+    if (fingers == 0) {
+        server.input_manager.pointer_gestures.sendHoldEnd(seat.wlr_seat, ev.time_msec, ev.cancelled);
+        return;
+    }
+    // Release the key held since hold_begin. A hold lasts well past one manage
+    // cycle, so the press has been acked; cancelled only means the hold ended,
+    // the key must still go up.
+    seat.releaseGestureKey();
+}
+
+/// Release a gesture key press that the window manager has acked.
+fn releaseGestureKey(seat: *Seat) void {
+    if (seat.pending_gesture_release) |binding| {
+        seat.pending_gesture_release = null;
+        binding.stopRepeat();
+        binding.released();
     }
 }
 
