@@ -67,16 +67,30 @@ pub const reserved = [2][4]?xkb.Keysym{
 /// 3 fingers: F9, 4 fingers: F10.
 pub const hold_reserved = [2]?xkb.Keysym{ .F9, .F10 };
 
-/// Keysyms for a 3/4-finger pinch-in, indexed by fingerIndex:
-/// 3 fingers: F11, 4 fingers: F12. Pinch-out is consumed but not mapped.
-pub const pinch_reserved = [2]?xkb.Keysym{ .F11, .F12 };
+pub const PinchDirection = enum {
+    in,
+    out,
+};
 
-/// Accumulated gesture scale below which a pinch counts as pinch-in.
+/// Keysyms for a 3/4-finger pinch, indexed by [finger index][PinchDirection].
+/// null entries are consumed but fire nothing:
+/// 3 fingers: unmapped; 4 fingers: out=F11 (张开), in=F12.
+pub const pinch_reserved = [2][2]?xkb.Keysym{
+    .{ null, null },
+    .{ .F12, .F11 },
+};
+
+/// Accumulated gesture scale below/above which a pinch counts as in/out.
 const min_scale_delta = 0.05;
 
 /// True when the accumulated scale is a deliberate pinch-in (捏合).
 pub fn isPinchIn(scale: f64) bool {
     return scale <= 1.0 - min_scale_delta;
+}
+
+/// True when the accumulated scale is a deliberate pinch-out (张开).
+pub fn isPinchOut(scale: f64) bool {
+    return scale >= 1.0 + min_scale_delta;
 }
 
 test "finger index, direction resolution and reserved table" {
@@ -106,11 +120,19 @@ test "finger index, direction resolution and reserved table" {
 
     try testing.expectEqual(xkb.Keysym.F9, hold_reserved[0].?);
     try testing.expectEqual(xkb.Keysym.F10, hold_reserved[1].?);
-    try testing.expectEqual(xkb.Keysym.F11, pinch_reserved[0].?);
-    try testing.expectEqual(xkb.Keysym.F12, pinch_reserved[1].?);
+
+    try testing.expect(pinch_reserved[0][@intFromEnum(PinchDirection.in)] == null);
+    try testing.expect(pinch_reserved[0][@intFromEnum(PinchDirection.out)] == null);
+    try testing.expectEqual(xkb.Keysym.F12, pinch_reserved[1][@intFromEnum(PinchDirection.in)].?);
+    try testing.expectEqual(xkb.Keysym.F11, pinch_reserved[1][@intFromEnum(PinchDirection.out)].?);
 
     try testing.expect(isPinchIn(0.8));
     try testing.expect(!isPinchIn(1.0));
     try testing.expect(!isPinchIn(1.1));
     try testing.expect(!isPinchIn(0.98));
+
+    try testing.expect(isPinchOut(1.2));
+    try testing.expect(!isPinchOut(1.0));
+    try testing.expect(!isPinchOut(0.9));
+    try testing.expect(!isPinchOut(1.02));
 }

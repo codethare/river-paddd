@@ -500,12 +500,17 @@ fn handlePinchEnd(seat: *Seat, ev: Event.PointerPinchEnd) void {
     }
     if (ev.cancelled) return;
 
-    // Pinch-in only (捏合); pinch-out and sub-threshold pinches are consumed
-    // without firing.
-    if (!GestureConfig.isPinchIn(scale)) return;
+    // Pinch in (捏合) or out (张开); sub-threshold pinches are consumed without
+    // firing.
+    const direction: GestureConfig.PinchDirection = if (GestureConfig.isPinchIn(scale))
+        .in
+    else if (GestureConfig.isPinchOut(scale))
+        .out
+    else
+        return;
 
     const fingers_index = GestureConfig.fingerIndex(fingers) orelse return;
-    if (GestureConfig.pinch_reserved[fingers_index]) |keysym| {
+    if (GestureConfig.pinch_reserved[fingers_index][@intFromEnum(direction)]) |keysym| {
         seat.injectGestureKey(keysym);
     }
 }
