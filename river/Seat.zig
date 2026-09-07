@@ -897,8 +897,8 @@ pub fn opEnd(seat: *Seat) void {
     }
 }
 
-pub fn attachNewDevice(seat: *Seat, wlr_device: *wlr.InputDevice, virtual: bool) void {
-    const device = seat.createDevice(wlr_device, virtual) catch |err| switch (err) {
+pub fn attachNewDevice(seat: *Seat, wlr_device: *wlr.InputDevice, options: InputDevice.Options) void {
+    const device = seat.createDevice(wlr_device, options) catch |err| switch (err) {
         error.OutOfMemory => {
             log.err("out of memory", .{});
             return;
@@ -910,20 +910,20 @@ pub fn attachNewDevice(seat: *Seat, wlr_device: *wlr.InputDevice, virtual: bool)
     }
 }
 
-fn createDevice(seat: *Seat, wlr_device: *wlr.InputDevice, virtual: bool) !?*InputDevice {
+fn createDevice(seat: *Seat, wlr_device: *wlr.InputDevice, options: InputDevice.Options) !?*InputDevice {
     switch (wlr_device.type) {
         .keyboard => {
-            const keyboard = try Keyboard.create(seat, wlr_device, virtual);
+            const keyboard = try Keyboard.create(seat, wlr_device, options);
             return &keyboard.device;
         },
         .pointer, .touch => {
             const device = try util.gpa.create(InputDevice);
             errdefer util.gpa.destroy(device);
-            try device.init(seat, wlr_device, virtual);
+            try device.init(seat, wlr_device, options);
             return device;
         },
         .tablet => {
-            const tablet = try Tablet.create(seat, wlr_device, virtual);
+            const tablet = try Tablet.create(seat, wlr_device, options);
             return &tablet.device;
         },
         .@"switch", .tablet_pad => return null, // unsupported

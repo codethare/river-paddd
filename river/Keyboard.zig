@@ -45,7 +45,7 @@ key: wl.Listener(*wlr.Keyboard.event.Key) = .init(queueKey),
 modifiers: wl.Listener(*wlr.Keyboard) = .init(queueModifiers),
 keymap: wl.Listener(*wlr.Keyboard) = .init(queueKeymap),
 
-pub fn create(seat: *Seat, wlr_device: *wlr.InputDevice, virtual: bool) !*Keyboard {
+pub fn create(seat: *Seat, wlr_device: *wlr.InputDevice, options: InputDevice.Options) !*Keyboard {
     const wlr_keyboard = wlr_device.toKeyboard();
 
     const keyboard = try util.gpa.create(Keyboard);
@@ -54,7 +54,7 @@ pub fn create(seat: *Seat, wlr_device: *wlr.InputDevice, virtual: bool) !*Keyboa
     keyboard.* = .{
         .config = .{
             .keymap = blk: {
-                if (virtual) {
+                if (options.virtual) {
                     // Non-null thanks to the NoKeymapVirtKeyboard workaround.
                     break :blk wlr_keyboard.keymap.?.ref();
                 } else {
@@ -69,7 +69,7 @@ pub fn create(seat: *Seat, wlr_device: *wlr.InputDevice, virtual: bool) !*Keyboa
     try keyboard.pressed.ensureTotalCapacity(util.gpa, KeyboardGroup.pressed_count_max);
     errdefer keyboard.pressed.deinit(util.gpa);
 
-    try keyboard.device.init(seat, wlr_device, virtual);
+    try keyboard.device.init(seat, wlr_device, options);
     errdefer keyboard.device.deinit();
 
     wlr_keyboard.data = keyboard;
@@ -77,7 +77,7 @@ pub fn create(seat: *Seat, wlr_device: *wlr.InputDevice, virtual: bool) !*Keyboa
     wlr_keyboard.events.key.add(&keyboard.key);
     wlr_keyboard.events.modifiers.add(&keyboard.modifiers);
 
-    if (virtual) {
+    if (options.virtual) {
         wlr_keyboard.events.keymap.add(&keyboard.keymap);
     } else {
         keyboard.keymap.link.init();

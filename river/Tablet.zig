@@ -16,7 +16,7 @@ const Seat = @import("Seat.zig");
 device: InputDevice,
 wp_tablet: *wlr.TabletV2Tablet,
 
-pub fn create(seat: *Seat, wlr_device: *wlr.InputDevice, virtual: bool) !*Tablet {
+pub fn create(seat: *Seat, wlr_device: *wlr.InputDevice, options: InputDevice.Options) !*Tablet {
     assert(wlr_device.type == .tablet);
 
     const tablet = try util.gpa.create(Tablet);
@@ -28,7 +28,7 @@ pub fn create(seat: *Seat, wlr_device: *wlr.InputDevice, virtual: bool) !*Tablet
         .device = undefined,
         .wp_tablet = try tablet_manager.createTabletV2Tablet(seat.wlr_seat, wlr_device),
     };
-    try tablet.device.init(seat, wlr_device, virtual);
+    try tablet.device.init(seat, wlr_device, options);
     errdefer tablet.device.deinit();
 
     return tablet;

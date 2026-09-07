@@ -22,6 +22,11 @@ const XkbKeyboard = @import("XkbKeyboard.zig");
 
 const log = std.log.scoped(.input);
 
+pub const Options = struct {
+    virtual: bool = false,
+    map_to_output: ?*wlr.Output = null,
+};
+
 seat: *Seat,
 wlr_device: *wlr.InputDevice,
 virtual: bool,
@@ -34,9 +39,9 @@ remove: wl.Listener(*wlr.InputDevice) = .init(handleRemove),
 
 config: struct {
     scroll_factor: f64 = 1.0,
-    map_to_output: ?*wlr.Output = null,
+    map_to_output: ?*wlr.Output,
     map_to_rectangle: wlr.Box = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
-} = .{},
+},
 
 /// InputManager.devices
 link: wl.list.Link,
@@ -45,12 +50,15 @@ pub fn init(
     device: *InputDevice,
     seat: *Seat,
     wlr_device: *wlr.InputDevice,
-    virtual: bool,
+    options: Options,
 ) !void {
     device.* = .{
         .seat = seat,
         .wlr_device = wlr_device,
-        .virtual = virtual,
+        .virtual = options.virtual,
+        .config = .{
+            .map_to_output = options.map_to_output,
+        },
         .libinput = undefined,
         .xkb_keyboard = undefined,
         .objects = undefined,
@@ -63,12 +71,12 @@ pub fn init(
     wlr_device.events.destroy.add(&device.remove);
 
     log.debug("new {s}input device: {s}-{s}", .{
-        if (virtual) "virtual " else "",
+        if (options.virtual) "virtual " else "",
         @tagName(wlr_device.type),
         wlr_device.name orelse "unknown",
     });
 
-    if (!virtual) {
+    if (!options.virtual) {
         var it = server.input_manager.objects.safeIterator(.forward);
         while (it.next()) |im_v1| {
             device.createObject(im_v1);

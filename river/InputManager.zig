@@ -201,7 +201,7 @@ pub fn processEvents(input_manager: *InputManager) void {
 fn handleNewInput(listener: *wl.Listener(*wlr.InputDevice), wlr_device: *wlr.InputDevice) void {
     const input_manager: *InputManager = @fieldParentPtr("new_input", listener);
 
-    input_manager.defaultSeat().attachNewDevice(wlr_device, false);
+    input_manager.defaultSeat().attachNewDevice(wlr_device, .{});
 }
 
 fn handleNewVirtualPointer(
@@ -209,7 +209,6 @@ fn handleNewVirtualPointer(
     event: *wlr.VirtualPointerManagerV1.event.NewPointer,
 ) void {
     const input_manager: *InputManager = @fieldParentPtr("new_virtual_pointer", listener);
-
     const seat: *Seat = blk: {
         if (event.suggested_seat) |wlr_seat| {
             break :blk @ptrCast(@alignCast(wlr_seat.data));
@@ -217,12 +216,10 @@ fn handleNewVirtualPointer(
             break :blk input_manager.defaultSeat();
         }
     };
-    // TODO dont ignore output suggestion
-    if (event.suggested_output != null) {
-        log.debug("Ignoring output suggestion from virtual pointer", .{});
-    }
-
-    seat.attachNewDevice(&event.new_pointer.pointer.base, true);
+    seat.attachNewDevice(&event.new_pointer.pointer.base, .{
+        .virtual = true,
+        .map_to_output = event.suggested_output,
+    });
 }
 
 fn handleNewVirtualKeyboard(
@@ -267,7 +264,7 @@ const NoKeymapVirtKeyboard = struct {
         handleVirtKeyboardDestroy(&no_keymap.destroy, &virtual_keyboard.keyboard.base);
 
         const seat: *Seat = @ptrCast(@alignCast(virtual_keyboard.seat.data));
-        seat.attachNewDevice(&virtual_keyboard.keyboard.base, true);
+        seat.attachNewDevice(&virtual_keyboard.keyboard.base, .{ .virtual = true });
     }
 };
 
