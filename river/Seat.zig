@@ -222,9 +222,13 @@ swipe: struct {
 } = .{},
 
 /// An in-progress touchpad hold taken over for sustained key injection
-/// (fingers != 0). The held key stays pressed until hold_end.
+/// (fingers != 0). The held press stays active until hold_end.
 hold: struct {
     fingers: u32 = 0,
+    /// hold_end arrived cancelled (superseded by movement): the held press is
+    /// kept down while the superseding swipe/pinch drives the op; its end
+    /// releases the press when the fingers lift.
+    bridging: bool = false,
 } = .{},
 
 /// An in-progress touchpad pinch taken over for key injection (fingers != 0).
@@ -396,10 +400,11 @@ pub fn queueEvent(seat: *Seat, event: Event) !void {
 pub fn processEvents(seat: *Seat) void {
     assert(server.wm.state == .idle);
 
-    // A gesture key press was sent to the window manager on a previous pump;
-    // send the release now that the press has been acked. A held key is not
-    // flushed here: it stays pressed until hold_end releases it.
-    if (seat.hold.fingers == 0) {
+    // A gesture press was sent to the window manager on a previous pump;
+    // send the release now that the press has been acked. A held press is
+    // not flushed here: it stays active until hold_end releases it (or until
+    // the superseding drag gesture ends).
+    if (seat.hold.fingers == 0 and !seat.hold.bridging) {
         seat.releaseGesture();
     }
 
@@ -439,13 +444,27 @@ pub fn processEvents(seat: *Seat) void {
 
 fn handleSwipeBegin(seat: *Seat, ev: Event.PointerSwipeBegin) void {
     if (GestureConfig.enabled and GestureConfig.fingerIndex(ev.fingers) != null) {
-        seat.swipe = .{ .fingers = ev.fingers };
+        // A superseding swipe continues the drag in progress; it must not
+        // start a fresh (F-key) swipe.
+        if (!seat.hold.bridging) {
+            seat.swipe = .{ .fingers = ev.fingers };
+        }
     } else {
         server.input_manager.pointer_gestures.sendSwipeBegin(seat.wlr_seat, ev.time_msec, ev.fingers);
     }
 }
 
 fn handleSwipeUpdate(seat: *Seat, ev: Event.PointerSwipeUpdate) void {
+    if (seat.hold.bridging) {
+        // Drag: feed the gesture deltas into the seat op — the cursor does
+        // not move during gesture contact, so the op must be driven directly.
+        if (seat.op) |*op| {
+            op.x += math.lossyCast(i32, ev.dx);
+            op.y += math.lossyCast(i32, ev.dy);
+            seat.opUpdate(op.x, op.y);
+        }
+        return;
+    }
     if (seat.swipe.fingers != 0) {
         seat.swipe.dx += ev.dx;
         seat.swipe.dy += ev.dy;
@@ -454,9 +473,14 @@ fn handleSwipeUpdate(seat: *Seat, ev: Event.PointerSwipeUpdate) void {
     }
 }
 
-const min_swipe_delta = 10.0;
-
 fn handleSwipeEnd(seat: *Seat, ev: Event.PointerSwipeEnd) void {
+    if (seat.hold.bridging) {
+        // The superseding gesture ended: fingers lifted, end the drag.
+        seat.hold = .{};
+        seat.releaseGesture();
+        return;
+    }
+
     const fingers = seat.swipe.fingers;
     const dx = seat.swipe.dx;
     const dy = seat.swipe.dy;
@@ -477,13 +501,18 @@ fn handleSwipeEnd(seat: *Seat, ev: Event.PointerSwipeEnd) void {
 
 fn handlePinchBegin(seat: *Seat, ev: Event.PointerPinchBegin) void {
     if (GestureConfig.enabled and GestureConfig.fingerIndex(ev.fingers) != null) {
-        seat.pinch = .{ .fingers = ev.fingers };
+        // A superseding pinch continues the drag in progress; don't start a
+        // fresh (F11/F12) pinch.
+        if (!seat.hold.bridging) {
+            seat.pinch = .{ .fingers = ev.fingers };
+        }
     } else {
         server.input_manager.pointer_gestures.sendPinchBegin(seat.wlr_seat, ev.time_msec, ev.fingers);
     }
 }
 
 fn handlePinchUpdate(seat: *Seat, ev: Event.PointerPinchUpdate) void {
+    if (seat.hold.bridging) return; // swallowed, part of the drag
     if (seat.pinch.fingers != 0) {
         // libinput scales are relative to the previous event, so multiply.
         seat.pinch.scale *= ev.scale;
@@ -493,6 +522,13 @@ fn handlePinchUpdate(seat: *Seat, ev: Event.PointerPinchUpdate) void {
 }
 
 fn handlePinchEnd(seat: *Seat, ev: Event.PointerPinchEnd) void {
+    if (seat.hold.bridging) {
+        // The superseding gesture ended: fingers lifted, end the drag.
+        seat.hold = .{};
+        seat.releaseGesture();
+        return;
+    }
+
     const fingers = seat.pinch.fingers;
     const scale = seat.pinch.scale;
     seat.pinch = .{};
@@ -521,7 +557,7 @@ fn handlePinchEnd(seat: *Seat, ev: Event.PointerPinchEnd) void {
 fn handleHoldBegin(seat: *Seat, ev: Event.PointerHoldBegin) void {
     if (GestureConfig.enabled and GestureConfig.fingerIndex(ev.fingers) != null) {
         // A second simultaneous hold (multi-touchpad) ends the first cleanly.
-        if (seat.hold.fingers != 0) seat.releaseGesture();
+        if (seat.hold.fingers != 0 or seat.hold.bridging) seat.releaseGesture();
         seat.hold = .{ .fingers = ev.fingers };
         if (GestureConfig.hold_reserved[GestureConfig.fingerIndex(ev.fingers).?]) |target| {
             switch (target) {
@@ -542,9 +578,19 @@ fn handleHoldEnd(seat: *Seat, ev: Event.PointerHoldEnd) void {
         server.input_manager.pointer_gestures.sendHoldEnd(seat.wlr_seat, ev.time_msec, ev.cancelled);
         return;
     }
-    // Release the key held since hold_begin. A hold lasts well past one manage
-    // cycle, so the press has been acked; cancelled only means the hold ended,
-    // the key must still go up.
+
+    if (ev.cancelled and seat.pending_gesture_release != null) {
+        // The hold was superseded by finger movement: libinput sends a
+        // cancelling hold_end before the swipe/pinch that now follows. Keep
+        // the press down and ride it out — swipe deltas drive the op (drag)
+        // and the superseding gesture's end releases it when fingers lift.
+        seat.hold = .{ .fingers = fingers, .bridging = true };
+        return;
+    }
+
+    // Fingers lifted: release the press held since hold_begin. A hold lasts
+    // well past one manage cycle, so the press has been acked.
+    seat.hold = .{};
     seat.releaseGesture();
 }
 
