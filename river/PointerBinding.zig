@@ -89,6 +89,11 @@ fn handleRequestInert(
 }
 
 fn handleDestroy(_: *river.PointerBindingV1, binding: *PointerBinding) void {
+    if (binding.seat.pending_gesture_release) |release| {
+        if (release == .button and release.button == binding) {
+            binding.seat.pending_gesture_release = null;
+        }
+    }
     if (binding.seat.cursor.pressed.getPtr(binding.button)) |value_ptr| {
         // It is possible for the window manager to create duplicate pointer bindings.
         if (value_ptr.* == binding) {

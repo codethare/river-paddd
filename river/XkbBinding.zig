@@ -99,8 +99,10 @@ fn handleRequestInert(
 }
 
 fn handleDestroy(_: *river.XkbBindingV1, binding: *XkbBinding) void {
-    if (binding.seat.pending_gesture_release == binding) {
-        binding.seat.pending_gesture_release = null;
+    if (binding.seat.pending_gesture_release) |release| {
+        if (release == .key and release.key == binding) {
+            binding.seat.pending_gesture_release = null;
+        }
     }
     {
         var it = binding.seat.keyboard_groups.iterator(.forward);

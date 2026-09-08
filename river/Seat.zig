@@ -233,10 +233,13 @@ pinch: struct {
     scale: f64 = 1,
 } = .{},
 
-/// A gesture key press already sent to the window manager; the release is
-/// sent once the press has been acked — at the start of the next pump for
+/// A gesture press already sent to the window manager; the release is sent
+/// once the press has been acked — at the start of the next pump for
 /// swipes/pinches, or at hold_end for holds.
-pending_gesture_release: ?*XkbBinding = null,
+pending_gesture_release: ?union(enum) {
+    key: *XkbBinding,
+    button: *PointerBinding,
+} = null,
 
 xkb_bindings: wl.list.Head(XkbBinding, .link),
 pointer_bindings: wl.list.Head(PointerBinding, .link),
@@ -397,7 +400,7 @@ pub fn processEvents(seat: *Seat) void {
     // send the release now that the press has been acked. A held key is not
     // flushed here: it stays pressed until hold_end releases it.
     if (seat.hold.fingers == 0) {
-        seat.releaseGestureKey();
+        seat.releaseGesture();
     }
 
     // Only process events while there is no new state to be sent to the window manager.
@@ -518,10 +521,13 @@ fn handlePinchEnd(seat: *Seat, ev: Event.PointerPinchEnd) void {
 fn handleHoldBegin(seat: *Seat, ev: Event.PointerHoldBegin) void {
     if (GestureConfig.enabled and GestureConfig.fingerIndex(ev.fingers) != null) {
         // A second simultaneous hold (multi-touchpad) ends the first cleanly.
-        if (seat.hold.fingers != 0) seat.releaseGestureKey();
+        if (seat.hold.fingers != 0) seat.releaseGesture();
         seat.hold = .{ .fingers = ev.fingers };
-        if (GestureConfig.hold_reserved[GestureConfig.fingerIndex(ev.fingers).?]) |keysym| {
-            seat.injectGestureKey(keysym);
+        if (GestureConfig.hold_reserved[GestureConfig.fingerIndex(ev.fingers).?]) |target| {
+            switch (target) {
+                .key => |keysym| seat.injectGestureKey(keysym),
+                .button => |button| seat.injectGestureButton(button),
+            }
         }
     } else {
         server.input_manager.pointer_gestures.sendHoldBegin(seat.wlr_seat, ev.time_msec, ev.fingers);
@@ -539,19 +545,24 @@ fn handleHoldEnd(seat: *Seat, ev: Event.PointerHoldEnd) void {
     // Release the key held since hold_begin. A hold lasts well past one manage
     // cycle, so the press has been acked; cancelled only means the hold ended,
     // the key must still go up.
-    seat.releaseGestureKey();
+    seat.releaseGesture();
 }
 
-/// Release a gesture key press that the window manager has acked.
-fn releaseGestureKey(seat: *Seat) void {
-    if (seat.pending_gesture_release) |binding| {
+/// Release a gesture press that the window manager has acked.
+fn releaseGesture(seat: *Seat) void {
+    if (seat.pending_gesture_release) |release| {
         seat.pending_gesture_release = null;
-        binding.stopRepeat();
-        binding.released();
+        switch (release) {
+            .key => |binding| {
+                binding.stopRepeat();
+                binding.released();
+            },
+            .button => |binding| binding.released(),
+        }
     }
 }
 
-/// Fire the window manager binding for `keysym`, or consume the gesture if
+/// Fire the window manager keybinding for `keysym`, or consume the gesture if
 /// unbound. Bindings are matched by keysym directly: the reserved keysyms
 /// need not exist in any keymap.
 fn injectGestureKey(seat: *Seat, keysym: xkb.Keysym) void {
@@ -568,9 +579,21 @@ fn injectGestureKey(seat: *Seat, keysym: xkb.Keysym) void {
 
         // Send the press now; the release follows at the start of the next pump,
         // mirroring how a normal key press/release is handled.
-        seat.pending_gesture_release = binding;
+        seat.pending_gesture_release = .{ .key = binding };
         binding.pressed();
         return;
+    }
+}
+
+/// Fire the window manager pointer binding for `button`, or consume the
+/// gesture if unbound.
+fn injectGestureButton(seat: *Seat, button: u32) void {
+    if (seat.pending_gesture_release != null) return; // a press is still unacked
+
+    if (seat.matchPointerBinding(button)) |binding| {
+        // Send the press now; the release follows at hold_end.
+        seat.pending_gesture_release = .{ .button = binding };
+        binding.pressed();
     }
 }
 

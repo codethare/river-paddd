@@ -62,10 +62,20 @@ pub const reserved = [2][4]?xkb.Keysym{
     .{ .F5, .F6, .F7, .F8 },
 };
 
-/// Keysyms pressed while a 3/4-finger hold is active, indexed by fingerIndex;
-/// the key is released at hold_end (sustained command):
-/// 3 fingers: F9, 4 fingers: F10.
-pub const hold_reserved = [2]?xkb.Keysym{ .F9, .F10 };
+pub const HoldTarget = union(enum) {
+    key: xkb.Keysym,
+    /// evdev button code (linux/input-event-codes.h BTN_*), e.g. BTN_SIDE = 0x113.
+    button: u32,
+};
+
+/// Press/release targets while a 3/4-finger hold is active, indexed by
+/// fingerIndex; the target stays active until hold_end (sustained command):
+/// 3 fingers: left/middle/right 'side' mouse button (BTN_SIDE, 0x113),
+/// 4 fingers: F10.
+pub const hold_reserved = [2]?HoldTarget{
+    .{ .button = 0x113 },
+    .{ .key = .F10 },
+};
 
 pub const PinchDirection = enum {
     in,
@@ -118,8 +128,12 @@ test "finger index, direction resolution and reserved table" {
     try testing.expectEqual(xkb.Keysym.F7, reserved[1][@intFromEnum(Direction.left)].?);
     try testing.expectEqual(xkb.Keysym.F8, reserved[1][@intFromEnum(Direction.right)].?);
 
-    try testing.expectEqual(xkb.Keysym.F9, hold_reserved[0].?);
-    try testing.expectEqual(xkb.Keysym.F10, hold_reserved[1].?);
+    try testing.expect(hold_reserved[0] != null);
+    switch (hold_reserved[0].?) {
+        .button => |b| try testing.expectEqual(@as(u32, 0x113), b),
+        .key => unreachable,
+    }
+    try testing.expectEqual(xkb.Keysym.F10, hold_reserved[1].?.key);
 
     try testing.expect(pinch_reserved[0][@intFromEnum(PinchDirection.in)] == null);
     try testing.expect(pinch_reserved[0][@intFromEnum(PinchDirection.out)] == null);
