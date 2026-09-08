@@ -456,12 +456,16 @@ fn handleSwipeBegin(seat: *Seat, ev: Event.PointerSwipeBegin) void {
 
 fn handleSwipeUpdate(seat: *Seat, ev: Event.PointerSwipeUpdate) void {
     if (seat.hold.bridging) {
-        // Drag: feed the gesture deltas into the seat op — the cursor does
-        // not move during gesture contact, so the op must be driven directly.
-        if (seat.op) |*op| {
-            op.x += math.lossyCast(i32, ev.dx);
-            op.y += math.lossyCast(i32, ev.dy);
-            seat.opUpdate(op.x, op.y);
+        // Drag: mirror a normal pointer drag — move the cursor by the gesture
+        // deltas and drive the op from the cursor position, so the cursor
+        // stays on the window being dragged.
+        const mapping: wlr.Box = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+        seat.cursor.move(&mapping, ev.dx, ev.dy);
+        if (seat.op != null) {
+            seat.opUpdate(
+                @intFromFloat(seat.cursor.wlr_cursor.x),
+                @intFromFloat(seat.cursor.wlr_cursor.y),
+            );
         }
         return;
     }
@@ -603,7 +607,17 @@ fn releaseGesture(seat: *Seat) void {
                 binding.stopRepeat();
                 binding.released();
             },
-            .button => |binding| binding.released(),
+            .button => |binding| {
+                binding.released();
+                // flume ignores `released` on pointer bindings and ends the op
+                // via op_release, which river only sends from Cursor.processButton
+                // when the last physical button lifts. A synthetic press never
+                // goes through that path, so end the op here.
+                if (seat.op != null) {
+                    seat.wm_scheduled.op_release = true;
+                    server.wm.dirtyWindowing();
+                }
+            },
         }
     }
 }

@@ -410,7 +410,7 @@ pub fn processMotionRelative(cursor: *Cursor, event: *const Seat.Event.PointerMo
     }
 }
 
-fn move(cursor: *const Cursor, mapping: *const wlr.Box, dx: f64, dy: f64) void {
+pub fn move(cursor: *const Cursor, mapping: *const wlr.Box, dx: f64, dy: f64) void {
     var lx: f64 = cursor.wlr_cursor.x + dx;
     var ly: f64 = cursor.wlr_cursor.y + dy;
     if (!mapping.empty()) {
