@@ -166,6 +166,8 @@ pub fn build(b: *Build) !void {
     translate_c.linkSystemLibrary("libevdev", .{});
     translate_c.linkSystemLibrary("libinput", .{});
 
+    const test_step = b.step("test", "Run the tests");
+
     {
         const river = b.addExecutable(.{
             .name = "river",
@@ -205,6 +207,15 @@ pub fn build(b: *Build) !void {
         river.root_module.omit_frame_pointer = omit_frame_pointer;
 
         b.installArtifact(river);
+
+        // Tests declared in the compositor module itself (river/Window.zig,
+        // river/gesture_config.zig, ...) run against the executable's root module.
+        const river_test = b.addTest(.{
+            .root_module = river.root_module,
+            .use_llvm = use_llvm,
+            .use_lld = use_llvm,
+        });
+        test_step.dependOn(&b.addRunArtifact(river_test).step);
     }
 
     {
@@ -257,22 +268,6 @@ pub fn build(b: *Build) !void {
         });
         const run_slotmap_test = b.addRunArtifact(slotmap_test);
 
-        const gesture_config_test = b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("river/gesture_config.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "xkbcommon", .module = xkbcommon },
-                },
-            }),
-            .use_llvm = use_llvm,
-            .use_lld = use_llvm,
-        });
-        const run_gesture_config_test = b.addRunArtifact(gesture_config_test);
-
-        const test_step = b.step("test", "Run the tests");
         test_step.dependOn(&run_slotmap_test.step);
-        test_step.dependOn(&run_gesture_config_test.step);
     }
 }

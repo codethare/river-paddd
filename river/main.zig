@@ -330,3 +330,8 @@ export fn river_wlroots_log_callback(importance: wlr.log.Importance, ptr: [*:0]c
         .silent, .last => unreachable,
     }
 }
+
+test {
+    _ = @import("Window.zig");
+    _ = @import("gesture_config.zig");
+}
