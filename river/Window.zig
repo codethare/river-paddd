@@ -143,12 +143,12 @@ const FrameBuffer = struct {
         const bw = border.width;
         const frame_right = content_width + bw; // first column right of the content
         const frame_bottom = content_height + bw; // first row below the content
-    // The corner radius grows with the border width, so the rounding stays
-    // visible no matter how thick the border is configured to be.
-    const radius: usize = @min(
-        @as(usize, border_radius) + border.width,
-        @min(fw, fh),
-    );
+        // The corner radius grows with the border width, so the rounding stays
+        // visible no matter how thick the border is configured to be.
+        const radius: usize = @min(
+            @as(usize, border_radius) + border.width,
+            @min(fw, fh),
+        );
 
         // Clip rectangle in tree coordinates. The frame is the content box
         // expanded by the border width on each side, so shift the clip by the
@@ -293,7 +293,6 @@ fn fillRect(ctx: *const BorderFillContext, x0: usize, x1: usize, y0: usize, y1: 
         }
     }
 }
-
 
 /// Windowing state requested by the wm.
 const WmRequested = struct {
@@ -1303,7 +1302,6 @@ fn drawBorders(window: *Window) void {
         .clip = requested.clip,
     };
 }
-
 
 fn applySurfaceClip(window: *Window, a: *const wlr.Box, b: *const wlr.Box) void {
     var surface_clip: wlr.Box = undefined;
