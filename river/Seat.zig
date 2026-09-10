@@ -104,16 +104,19 @@ pub const Event = union(enum) {
     };
 
     pub const PointerSwipeBegin = struct {
+        device: *wlr.InputDevice,
         time_msec: u32,
         fingers: u32,
     };
     pub const PointerSwipeUpdate = struct {
+        device: *wlr.InputDevice,
         time_msec: u32,
         fingers: u32,
         dx: f64,
         dy: f64,
     };
     pub const PointerSwipeEnd = struct {
+        device: *wlr.InputDevice,
         time_msec: u32,
         cancelled: bool,
     };
@@ -497,7 +500,7 @@ fn handleSwipeEnd(seat: *Seat, ev: Event.PointerSwipeEnd) void {
     if (ev.cancelled) return;
 
     const fingers_index = GestureConfig.fingerIndex(fingers) orelse return;
-    const direction = GestureConfig.resolveDirection(dx, dy, seat.naturalScroll()) orelse return;
+    const direction = GestureConfig.resolveDirection(dx, dy, naturalScroll(ev.device)) orelse return;
     if (GestureConfig.reserved[fingers_index][@intFromEnum(direction)]) |keysym| {
         seat.injectGestureKey(keysym);
     }
@@ -663,16 +666,16 @@ fn gestureGroup(seat: *Seat) ?*KeyboardGroup {
     return @ptrCast(@alignCast(wlr_keyboard.data));
 }
 
-/// Natural scroll setting of the first pointer libinput device on this seat.
-/// ponytail: swipe events carry no device, so the first pointer device stands
-/// in for all of the seat's touchpads.
-fn naturalScroll(seat: *Seat) bool {
+/// Natural scroll setting of the device that generated the swipe. The device
+/// is looked up in the device list rather than dereferencing the raw pointer,
+/// which may have been destroyed while the event sat in the queue.
+fn naturalScroll(wlr_device: *wlr.InputDevice) bool {
     var it = server.input_manager.devices.iterator(.forward);
     while (it.next()) |device| {
-        if (device.seat != seat) continue;
-        if (device.virtual) continue;
-        if (device.wlr_device.type != .pointer) continue;
-        if (c.libinput_device_config_scroll_has_natural_scroll(device.libinput.libinput) == 0) continue;
+        if (device.wlr_device != wlr_device) continue;
+        // Virtual devices have no libinput handle (and no scroll config).
+        if (device.virtual) return false;
+        if (c.libinput_device_config_scroll_has_natural_scroll(device.libinput.libinput) == 0) return false;
         return c.libinput_device_config_scroll_get_natural_scroll_enabled(device.libinput.libinput) != 0;
     }
     return false;

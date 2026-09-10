@@ -898,6 +898,7 @@ fn queuePinchEnd(listener: *wl.Listener(*wlr.Pointer.event.PinchEnd), event: *wl
 fn queueSwipeBegin(listener: *wl.Listener(*wlr.Pointer.event.SwipeBegin), event: *wlr.Pointer.event.SwipeBegin) void {
     const cursor: *Cursor = @fieldParentPtr("swipe_begin", listener);
     cursor.seat.queueEvent(.{ .pointer_swipe_begin = .{
+        .device = event.device,
         .time_msec = event.time_msec,
         .fingers = event.fingers,
     } }) catch {};
@@ -906,6 +907,7 @@ fn queueSwipeBegin(listener: *wl.Listener(*wlr.Pointer.event.SwipeBegin), event:
 fn queueSwipeUpdate(listener: *wl.Listener(*wlr.Pointer.event.SwipeUpdate), event: *wlr.Pointer.event.SwipeUpdate) void {
     const cursor: *Cursor = @fieldParentPtr("swipe_update", listener);
     cursor.seat.queueEvent(.{ .pointer_swipe_update = .{
+        .device = event.device,
         .time_msec = event.time_msec,
         .fingers = event.fingers,
         .dx = event.dx,
@@ -916,6 +918,7 @@ fn queueSwipeUpdate(listener: *wl.Listener(*wlr.Pointer.event.SwipeUpdate), even
 fn queueSwipeEnd(listener: *wl.Listener(*wlr.Pointer.event.SwipeEnd), event: *wlr.Pointer.event.SwipeEnd) void {
     const cursor: *Cursor = @fieldParentPtr("swipe_end", listener);
     cursor.seat.queueEvent(.{ .pointer_swipe_end = .{
+        .device = event.device,
         .time_msec = event.time_msec,
         .cancelled = event.cancelled,
     } }) catch {};
