@@ -126,42 +126,37 @@ const FrameBuffer = struct {
     }
 
     /// Fill one corner square with the ring's anti-aliased coverage, clipped
-    /// to `clip` (in frame coordinates). `frame` holds the square's texture
-    /// and `origin` is the square's position in frame coordinates.
+    /// to `clip` (in frame coordinates). `frame` holds the square's texture,
+    /// rasterized at `scale` device pixels per logical pixel, and `origin` is
+    /// the square's position in frame coordinates.
     fn fillCorner(
         frame: *FrameBuffer,
         ctx: *const BorderFillContext,
-        origin_x: usize,
-        origin_y: usize,
+        origin_x: f64,
+        origin_y: f64,
         clip: *const wlr.Box,
+        scale: f64,
     ) void {
         @memset(frame.pixels, 0);
 
-        const size = frame.fw;
-        var x0: usize = 0;
-        var x1: usize = size;
-        var y0: usize = 0;
-        var y1: usize = size;
-        if (!clip.empty()) {
-            const si: i64 = @intCast(size);
-            const ox: i64 = @intCast(origin_x);
-            const oy: i64 = @intCast(origin_y);
-            x0 = @intCast(@min(@max(@as(i64, clip.x) - ox, 0), si));
-            x1 = @intCast(@min(@max(@as(i64, clip.x) + @as(i64, clip.width) - ox, 0), si));
-            y0 = @intCast(@min(@max(@as(i64, clip.y) - oy, 0), si));
-            y1 = @intCast(@min(@max(@as(i64, clip.y) + @as(i64, clip.height) - oy, 0), si));
-        }
-        if (x0 >= x1 or y0 >= y1) return;
-
-        const color = ctx.color;
+        const raster = frame.fw;
         const pixels: [*]u32 = @ptrCast(@alignCast(frame.pixels.ptr));
-        var ly = y0;
-        while (ly < y1) : (ly += 1) {
-            var lx = x0;
-            while (lx < x1) : (lx += 1) {
-                const cov = ringCoverage(ctx, origin_x + lx, origin_y + ly);
-                if (cov == 0) continue;
-                pixels[ly * size + lx] = premultipliedPixel(color, cov);
+        const clip_x0: f64 = @floatFromInt(clip.x);
+        const clip_y0: f64 = @floatFromInt(clip.y);
+        const clip_x1: f64 = @floatFromInt(clip.x + clip.width);
+        const clip_y1: f64 = @floatFromInt(clip.y + clip.height);
+
+        var j: usize = 0;
+        while (j < raster) : (j += 1) {
+            const y = origin_y + (@as(f64, @floatFromInt(j)) + 0.5) / scale;
+            if (!clip.empty() and (y < clip_y0 or y >= clip_y1)) continue;
+            var i: usize = 0;
+            while (i < raster) : (i += 1) {
+                const x = origin_x + (@as(f64, @floatFromInt(i)) + 0.5) / scale;
+                if (!clip.empty() and (x < clip_x0 or x >= clip_x1)) continue;
+                const coverage = ringCoverage(ctx, x, y);
+                if (coverage == 0) continue;
+                pixels[j * raster + i] = premultipliedPixel(ctx.color, coverage);
             }
         }
     }
@@ -178,12 +173,13 @@ fn premultipliedPixel(color: [4]u8, coverage: f64) u32 {
 }
 
 const BorderFillContext = struct {
-    fw: usize,
-    fh: usize,
-    bw: usize,
-    radius: usize,
-    frame_right: usize,
-    frame_bottom: usize,
+    /// Frame and border geometry in logical pixels.
+    fw: f64,
+    fh: f64,
+    bw: f64,
+    radius: f64,
+    frame_right: f64,
+    frame_bottom: f64,
     edges: river.WindowV1.Edges,
     color: [4]u8,
 };
@@ -254,61 +250,69 @@ fn overflowFreeRadius(bw: usize) usize {
     return @intFromFloat(@floor(max));
 }
 
-/// Coverage of the pixel at (px, py) relative to a rounded corner of radius r
-/// centered r pixels from both edges: 1 = fully inside the rounded rect,
-/// 0 = fully cut away. The arc boundary is feathered over one pixel.
-fn cornerCoverage(px: usize, py: usize, r: usize) f64 {
-    const rr: f64 = @floatFromInt(r);
-    const dx = @as(f64, @floatFromInt(px)) + 0.5 - rr;
-    const dy = @as(f64, @floatFromInt(py)) + 0.5 - rr;
-    return @max(0, @min(1, rr - @sqrt(dx * dx + dy * dy) + 0.5));
+/// Device pixel size of a corner texture: the corner square is `size` logical
+/// pixels, rasterized at `scale` device pixels per logical pixel so the arc
+/// stays crisp on HiDPI outputs.
+fn cornerRaster(size: usize, scale: f64) usize {
+    const scaled = @ceil(@as(f64, @floatFromInt(size)) * scale);
+    if (!(scaled >= 1)) return 1;
+    return @intFromFloat(scaled);
 }
 
-/// Coverage of the border ring's corner band over the window corner: pixels
-/// at a distance to the arc center between r - bw and r. The band is what
-/// makes the two strips visibly join around the corner when the border is
-/// thinner than the corner radius, and it is drawn above the window content.
-fn bandCoverage(px: usize, py: usize, r: usize, bw: usize) f64 {
-    const rr: f64 = @floatFromInt(r);
-    const dx = @as(f64, @floatFromInt(px)) + 0.5 - rr;
-    const dy = @as(f64, @floatFromInt(py)) + 0.5 - rr;
+/// Coverage of the point (x, y) — a pixel center in frame coordinates —
+/// relative to a rounded corner of radius r centered r pixels from both edges:
+/// 1 = fully inside the rounded rect, 0 = fully cut away. The arc boundary is
+/// feathered over one pixel.
+fn cornerCoverage(x: f64, y: f64, r: f64) f64 {
+    const dx = x - r;
+    const dy = y - r;
+    return @max(0, @min(1, r - @sqrt(dx * dx + dy * dy) + 0.5));
+}
+
+/// Coverage of the border ring's corner band over the window corner: points at
+/// a distance to the arc center between r - bw and r. The band is what makes
+/// the two strips visibly join around the corner when the border is thinner
+/// than the corner radius, and it is drawn above the window content.
+fn bandCoverage(x: f64, y: f64, r: f64, bw: f64) f64 {
+    const dx = x - r;
+    const dy = y - r;
     const dist = @sqrt(dx * dx + dy * dy);
-    if (dist > rr) return 0; // trimmed away by the corner
-    if (dist < rr - @as(f64, @floatFromInt(bw))) return 0; // inside the ring's inner edge
-    return @max(0, @min(1, rr - dist + 0.5));
+    if (dist > r) return 0; // trimmed away by the corner
+    if (dist < r - bw) return 0; // inside the ring's inner edge
+    return @max(0, @min(1, r - dist + 0.5));
 }
 
-/// Ring membership and coverage of a frame pixel: returns 0 for pixels that
-/// are not part of the border ring.
-fn ringCoverage(ctx: *const BorderFillContext, px: usize, py: usize) f64 {
+/// Ring membership and coverage at a pixel center (x, y) in frame coordinates:
+/// returns 0 for points that are not part of the border ring.
+fn ringCoverage(ctx: *const BorderFillContext, x: f64, y: f64) f64 {
     const bw = ctx.bw;
     const r = ctx.radius;
     const fr = ctx.frame_right;
     const fb = ctx.frame_bottom;
-    const in_hole = px >= bw and px < fr and py >= bw and py < fb;
+    const in_hole = x >= bw and x < fr and y >= bw and y < fb;
     if (!in_hole) {
         // Strips outside the content box, per the documented corner contract:
         // a side strip only extends vertically past an edge that is drawn.
-        const y_lo: usize = if (ctx.edges.top) 0 else bw;
+        const y_lo: f64 = if (ctx.edges.top) 0 else bw;
         const y_hi = fb + (if (ctx.edges.bottom) bw else 0);
-        const in_left = px < bw and ctx.edges.left and py >= y_lo and py < y_hi;
-        const in_right = px >= fr and ctx.edges.right and py >= y_lo and py < y_hi;
-        const in_top = py < bw and ctx.edges.top and px >= bw and px < fr;
-        const in_bottom = py >= fb and ctx.edges.bottom and px >= bw and px < fr;
+        const in_left = x < bw and ctx.edges.left and y >= y_lo and y < y_hi;
+        const in_right = x >= fr and ctx.edges.right and y >= y_lo and y < y_hi;
+        const in_top = y < bw and ctx.edges.top and x >= bw and x < fr;
+        const in_bottom = y >= fb and ctx.edges.bottom and x >= bw and x < fr;
         if (!in_left and !in_right and !in_top and !in_bottom) return 0;
         // Round the corner where the two adjacent edges are both drawn.
-        if (ctx.edges.top and ctx.edges.left and px < r and py < r) return cornerCoverage(px, py, r);
-        if (ctx.edges.top and ctx.edges.right and px >= ctx.fw - r and py < r) return cornerCoverage(ctx.fw - 1 - px, py, r);
-        if (ctx.edges.bottom and ctx.edges.left and px < r and py >= ctx.fh - r) return cornerCoverage(px, ctx.fh - 1 - py, r);
-        if (ctx.edges.bottom and ctx.edges.right and px >= ctx.fw - r and py >= ctx.fh - r) return cornerCoverage(ctx.fw - 1 - px, ctx.fh - 1 - py, r);
+        if (ctx.edges.top and ctx.edges.left and x < r and y < r) return cornerCoverage(x, y, r);
+        if (ctx.edges.top and ctx.edges.right and x >= ctx.fw - r and y < r) return cornerCoverage(ctx.fw - x, y, r);
+        if (ctx.edges.bottom and ctx.edges.left and x < r and y >= ctx.fh - r) return cornerCoverage(x, ctx.fh - y, r);
+        if (ctx.edges.bottom and ctx.edges.right and x >= ctx.fw - r and y >= ctx.fh - r) return cornerCoverage(ctx.fw - x, ctx.fh - y, r);
         return 1;
     }
     // Inside the content box, only the corner band of the ring, where both
     // adjacent edges are drawn.
-    if (ctx.edges.top and ctx.edges.left and px < r and py < r) return bandCoverage(px, py, r, bw);
-    if (ctx.edges.top and ctx.edges.right and px >= ctx.fw - r and py < r) return bandCoverage(ctx.fw - 1 - px, py, r, bw);
-    if (ctx.edges.bottom and ctx.edges.left and px < r and py >= ctx.fh - r) return bandCoverage(px, ctx.fh - 1 - py, r, bw);
-    if (ctx.edges.bottom and ctx.edges.right and px >= ctx.fw - r and py >= ctx.fh - r) return bandCoverage(ctx.fw - 1 - px, ctx.fh - 1 - py, r, bw);
+    if (ctx.edges.top and ctx.edges.left and x < r and y < r) return bandCoverage(x, y, r, bw);
+    if (ctx.edges.top and ctx.edges.right and x >= ctx.fw - r and y < r) return bandCoverage(ctx.fw - x, y, r, bw);
+    if (ctx.edges.bottom and ctx.edges.left and x < r and y >= ctx.fh - r) return bandCoverage(x, ctx.fh - y, r, bw);
+    if (ctx.edges.bottom and ctx.edges.right and x >= ctx.fw - r and y >= ctx.fh - r) return bandCoverage(ctx.fw - x, ctx.fh - y, r, bw);
     return 0;
 }
 
@@ -445,10 +449,11 @@ border: struct {
     corners: [4]*wlr.SceneBuffer,
 },
 
-/// Inputs of the last border frame texture, so drawBorders() can skip the
+/// Inputs of the last border corner textures, so drawBorders() can skip the
 /// render and upload work on render sequences where nothing changed.
 border_rendered: struct {
     valid: bool = false,
+    scale: f64 = 1,
     width: u31 = 0,
     r: u32 = 0,
     g: u32 = 0,
@@ -1281,10 +1286,14 @@ fn drawBorders(window: *Window) void {
         return;
     }
 
+    // The corner textures are rasterized at the scale of the output the window
+    // is on, so the arcs stay crisp on HiDPI outputs.
+    const scale = windowScale(window);
+
     // Skip the render and upload when nothing changed since the last render
     // sequence (this function runs for every window on every sequence).
     const cached = &window.border_rendered;
-    if (cached.valid and cached.width == border.width and
+    if (cached.valid and cached.scale == scale and cached.width == border.width and
         cached.r == border.r and cached.g == border.g and
         cached.b == border.b and cached.a == border.a and
         cached.edges == @as(u32, @bitCast(edges)) and
@@ -1331,12 +1340,12 @@ fn drawBorders(window: *Window) void {
         @as(f32, @floatFromInt(color[3])) / 255.0,
     };
     const ctx = BorderFillContext{
-        .fw = frame_width,
-        .fh = frame_height,
-        .bw = border_width,
-        .radius = radius,
-        .frame_right = content_width + border_width,
-        .frame_bottom = content_height + border_width,
+        .fw = @floatFromInt(frame_width),
+        .fh = @floatFromInt(frame_height),
+        .bw = @floatFromInt(border_width),
+        .radius = @floatFromInt(radius),
+        .frame_right = @floatFromInt(content_width + border_width),
+        .frame_bottom = @floatFromInt(content_height + border_width),
         .edges = edges,
         .color = color,
     };
@@ -1362,21 +1371,25 @@ fn drawBorders(window: *Window) void {
         }
     }
 
+    const raster = cornerRaster(geometry.size, scale);
     for (geometry.corners, window.border.corners) |corner, scene_buffer| {
-        const frame = FrameBuffer.create(geometry.size, geometry.size) catch {
+        const frame = FrameBuffer.create(raster, raster) catch {
             std.log.err("out of memory drawing window borders", .{});
             return;
         };
-        frame.fillCorner(&ctx, @intCast(corner.x), @intCast(corner.y), &clip);
+        frame.fillCorner(&ctx, @floatFromInt(corner.x), @floatFromInt(corner.y), &clip, scale);
         scene_buffer.node.setEnabled(true);
         scene_buffer.node.setPosition(corner.x + offset, corner.y + offset);
         scene_buffer.setBuffer(&frame.base);
+        // Display the device resolution texture at its logical size.
+        scene_buffer.setDestSize(@intCast(geometry.size), @intCast(geometry.size));
         // The scene buffer holds the one remaining reference to the frame.
         frame.base.drop();
     }
 
     cached.* = .{
         .valid = true,
+        .scale = scale,
         .width = border.width,
         .r = border.r,
         .g = border.g,
@@ -1387,6 +1400,19 @@ fn drawBorders(window: *Window) void {
         .content_height = @intCast(content_height),
         .clip = requested.clip,
     };
+}
+
+/// Scale of the output the window is on, used to rasterize the corner textures
+/// at device resolution. A window spanning outputs uses the scale of the output
+/// under its center.
+fn windowScale(window: *Window) f64 {
+    const center_x = @as(f64, @floatFromInt(window.box.x)) +
+        @as(f64, @floatFromInt(window.box.width)) / 2;
+    const center_y = @as(f64, @floatFromInt(window.box.y)) +
+        @as(f64, @floatFromInt(window.box.height)) / 2;
+    const wlr_output = server.om.outputAt(center_x, center_y) orelse return 1;
+    const scale: f64 = wlr_output.scale;
+    return if (scale > 0) scale else 1;
 }
 
 /// Hide every border node (no visible border, e.g. fullscreen or a fully
@@ -1591,7 +1617,7 @@ test "rounded border corner coverage" {
     // Deep inside the border region is fully covered.
     try testing.expectEqual(@as(f64, 1), cornerCoverage(9, 9, 10));
     // The arc boundary is feathered over about one pixel.
-    const partial = cornerCoverage(2, 3, 10);
+    const partial = cornerCoverage(2.5, 3.5, 10);
     try testing.expect(partial > 0 and partial < 1);
     // The overflow-free radius bound keeps content corners inside the arc.
     try testing.expectEqual(@as(usize, 5), overflowFreeRadius(1));
@@ -1666,6 +1692,17 @@ test "border geometry keeps the strips clear of the corners" {
     try testing.expectEqual(@as(usize, 12), thick.size);
 }
 
+test "corner textures are rasterized at the output scale" {
+    const testing = std.testing;
+    // The texture is never smaller than the logical square: the arc is never
+    // upscaled, only downscaled onto the output.
+    try testing.expectEqual(@as(usize, 10), cornerRaster(10, 1));
+    try testing.expectEqual(@as(usize, 20), cornerRaster(10, 2));
+    try testing.expectEqual(@as(usize, 15), cornerRaster(10, 1.5));
+    try testing.expectEqual(@as(usize, 13), cornerRaster(10, 1.25));
+    try testing.expectEqual(@as(usize, 1), cornerRaster(1, 0.5));
+}
+
 test "border geometry covers exactly the ring" {
     const testing = std.testing;
     const cases = .{
@@ -1686,12 +1723,12 @@ test "border geometry covers exactly the ring" {
         // The corner squares only stay disjoint for these sizes.
         try testing.expect(2 * geometry.size <= @min(frame_width, frame_height));
         const ctx = BorderFillContext{
-            .fw = frame_width,
-            .fh = frame_height,
-            .bw = bw,
-            .radius = radius,
-            .frame_right = content_width + bw,
-            .frame_bottom = content_height + bw,
+            .fw = @floatFromInt(frame_width),
+            .fh = @floatFromInt(frame_height),
+            .bw = @floatFromInt(bw),
+            .radius = @floatFromInt(radius),
+            .frame_right = @floatFromInt(content_width + bw),
+            .frame_bottom = @floatFromInt(content_height + bw),
             .edges = edges,
             .color = .{ 255, 255, 255, 255 },
         };
@@ -1699,7 +1736,12 @@ test "border geometry covers exactly the ring" {
         while (py < frame_height) : (py += 1) {
             var px: usize = 0;
             while (px < frame_width) : (px += 1) {
-                const coverage = ringCoverage(&ctx, px, py);
+                // Sample at the pixel center, as the corner fill does.
+                const coverage = ringCoverage(
+                    &ctx,
+                    @as(f64, @floatFromInt(px)) + 0.5,
+                    @as(f64, @floatFromInt(py)) + 0.5,
+                );
                 var in_strip = false;
                 var pieces: usize = 0;
                 for (geometry.strips) |strip| {

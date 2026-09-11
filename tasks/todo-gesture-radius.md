@@ -12,11 +12,13 @@
 
 ## RC4 — HiDPI corner textures
 
-- [ ] Determine output scale in `drawBorders` via `OutputManager.outputAt`
-- [ ] Scale corner raster size: `ceil(size * scale)`, `radius * scale`, `setDestSize`
-- [ ] Add `scale` to `border_rendered` cache key
-- [ ] Verify `zig build test` passes
-- [ ] `zig fmt` clean
+- [x] Determine the output scale in `drawBorders` via `OutputManager.outputAt` (window center)
+- [x] Rasterize the corner textures at `ceil(size * scale)` device pixels and display them at the
+      logical size with `scene_buffer.setDestSize`
+- [x] Move the coverage math to f64 pixel centers so fractional scales work (1x output is
+      pixel-identical to before)
+- [x] Add `scale` to the `border_rendered` cache key (re-rasterize when the window changes output)
+- [x] Verify `zig build test` passes (16/16) and `zig fmt` clean
 
 ## G4a — File-based gesture config
 
