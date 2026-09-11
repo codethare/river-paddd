@@ -73,18 +73,17 @@ const border_radius: u31 = 10;
 /// so the rounded corners are rendered into this texture.
 const FrameBuffer = struct {
     base: wlr.Buffer,
+    /// Borrowed from the window's reusable border storage.
     pixels: []align(16) u8,
     fw: usize,
     fh: usize,
-    alloc: std.mem.Allocator,
 
     /// wl_shm ARGB8888 (little-endian byte order B,G,R,A)
     const format_argb8888: u32 = 0x34325241;
 
     fn destroyImpl(buffer: *wlr.Buffer) callconv(.c) void {
         const frame: *FrameBuffer = @fieldParentPtr("base", buffer);
-        frame.alloc.free(frame.pixels);
-        frame.alloc.destroy(frame);
+        util.gpa.destroy(frame);
     }
 
     fn beginDataPtrAccess(
@@ -112,15 +111,12 @@ const FrameBuffer = struct {
         .end_data_ptr_access = endDataPtrAccess,
     };
 
-    fn create(width: usize, height: usize) !*FrameBuffer {
-        const alloc = util.gpa;
-        const frame = try alloc.create(FrameBuffer);
-        errdefer alloc.destroy(frame);
-        frame.alloc = alloc;
+    fn create(pixels: []align(16) u8, width: usize, height: usize) !*FrameBuffer {
+        const frame = try util.gpa.create(FrameBuffer);
+        errdefer util.gpa.destroy(frame);
+        frame.pixels = pixels;
         frame.fw = width;
         frame.fh = height;
-        frame.pixels = try alloc.alignedAlloc(u8, .@"16", width * height * @sizeOf(u32));
-        errdefer alloc.free(frame.pixels);
         wlr.Buffer.init(&frame.base, &impl, @intCast(width), @intCast(height));
         return frame;
     }
@@ -433,6 +429,12 @@ border: struct {
     scene_buffer: *wlr.SceneBuffer,
 },
 
+/// Pixel storage reused by the border frame texture. The wlr.Buffer wrapping
+/// it is recreated per render because the renderer caches a buffer's texture,
+/// so re-renders (focus and clip changes) do not reallocate the frame-sized
+/// buffer.
+border_pixels: ?[]align(16) u8 = null,
+
 /// Inputs of the last border frame texture, so drawBorders() can skip the
 /// render and upload work on render sequences where nothing changed.
 border_rendered: struct {
@@ -602,6 +604,10 @@ pub fn destroy(window: *Window) void {
     }
 
     window.tree.node.destroy();
+
+    // The scene buffer (and with it the frame) is gone by now, so the pixel
+    // storage it borrowed can be released.
+    if (window.border_pixels) |pixels| util.gpa.free(pixels);
     window.popup_tree.node.destroy();
     window.capture_scene.tree.node.destroy();
 
@@ -1286,7 +1292,16 @@ fn drawBorders(window: *Window) void {
         return;
     }
 
-    const frame = FrameBuffer.create(frame_width, frame_height) catch {
+    const pixels_len = frame_width * frame_height * @sizeOf(u32);
+    if (window.border_pixels == null or window.border_pixels.?.len != pixels_len) {
+        if (window.border_pixels) |pixels| util.gpa.free(pixels);
+        window.border_pixels = util.gpa.alignedAlloc(u8, .@"16", pixels_len) catch {
+            std.log.err("out of memory drawing window borders", .{});
+            return;
+        };
+    }
+
+    const frame = FrameBuffer.create(window.border_pixels.?, frame_width, frame_height) catch {
         std.log.err("out of memory drawing window borders", .{});
         return;
     };
