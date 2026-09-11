@@ -43,9 +43,9 @@ mapping lives in `river/gesture_config.zig`; see `route-a-gesture-patch-plan.md`
 for the design rationale.
 
 Window borders are drawn with rounded outer corners (radius up to 10px,
-clamped per window so the square content corners stay inside the arc, drawn
-from a CPU-rendered frame texture), see `SPEC-rounded-window-borders.md` for
-the design rationale.
+clamped per window so the square content corners stay inside the arc) using
+scene rects for the edges and small anti-aliased corner textures, see
+`SPEC-rounded-window-borders.md` for the design rationale.
 
 ## Links
 

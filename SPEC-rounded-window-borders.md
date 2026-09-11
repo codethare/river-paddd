@@ -16,21 +16,16 @@
 
 ## 技术方案(设计)
 
-**方案 A(推荐):单张 CPU 渲染的边框纹理 + 一个 `wlr.SceneBuffer` 取代 4 个 rect。**
+**方案 A(已实现):边条用 `wlr.SceneRect`,四角用 `r×r` CPU 渲染纹理。**
 
-- 分配 ARGB8888 缓冲区,尺寸 `(content.width + 2*bw) × (content.height + 2*bw)`,节点置于窗口树内 `(-bw, -bw)`。
-- 填充:
-  - 四条边条:逐行/列直填(轴对齐,无需 AA)。
-  - 四角:仅遍历每个 `r×r` 角区,逐像素求覆盖度 `alpha = clamp(r - dist((x,y),(r,r)), 0, 1)` 得到 1px 软边(解析 AA,无锯齿)。r 为圆角半径,bw < r 时角部呈月牙形过渡;bw ≥ r 时天然退化为直角(由 r 配置约束)。
-  - 像素预乘 alpha(与 wlroots 混合模式一致,保证半透明边框颜色正确)。
-- 上屏:自定义 `wlr.Buffer`(实现 `wlr_buffer_impl` 的 `get_shm` / `begin_data_ptr_access`,zig-wlroots 的 `wlr.Buffer.init` 已可用),`wlr_scene_buffer_set_buffer` 接替或重建;每次 `drawBorders()`(颜色/宽度/尺寸/edges 变化时)重填纹理。边框面积 ≈ 周长×bw,开销可忽略。
-- 裁剪兼容:现有每边 rect 与 `requested.clip` 的矩形求交改为 CPU 填充时跳过 clip 外像素(同一坐标空间)。
+- 分解依据:`ringCoverage()` 在四个 `max(r, bw)` 见方的角区之外取值恒为 0 或 1,因此边条可以是纯色矩形,只有角部需要 AA 纹理(分解的逐像素精确性由单测保证)。
+- 边条:4 个 `wlr.SceneRect`,按 edges 位掩码决定画出与否,并与 `requested.clip` 求交;侧条仅在相邻水平边存在时纵向延伸(沿用旧 rect 契约)。
+- 四角:每角一张 `size×size`(size = max(r, bw))ARGB8888 纹理,自定义 `wlr.Buffer`(实现 `wlr_buffer_impl` 的 `get_shm` / `begin_data_ptr_access`)。逐像素覆盖度 `alpha = clamp(r - dist((x,y),(r,r)), 0, 1)` 得到 1px 软边;`bw < r` 时角部含月牙形 band;预乘 alpha。clip 外的像素写 0(透明)。
+- 开销:每窗口四张 `size²` 纹理(r≤10 → 400 px/角,合计 ~1.6 KB),与全帧纹理方案(4K 窗口 ~33 MB + 全屏填充率)相比内存与带宽降低约 4 个数量级;边条为零纹理矩形。尺寸/edges/颜色/clip 变化时重建。
 - 内容不溢出:wlroots 0.20 场景图无法对客户端内容做圆角裁剪(只有矩形 clip),因此有效半径按边框宽度收敛:
   `r_eff = min(10, floor((bw + 0.5)·(2+√2)))`,保证内容方角保持在圆弧内侧(如 bw=2 → r=8)。
-- edges 位掩码(平铺窗口只画部分边):按已画边生成对应边条;圆角仅出现在两条相邻边都存在的角。
-- 全屏/无边框窗口(`width=0` 或不画边):纹理尺寸为 0 或禁用节点,与现状等价。
-
-**方案 B(不推荐,仅作对照):每角用 N 个细长 rect 阶梯逼近圆弧。** 零纹理、改动最小,但锯齿明显、节点数暴增(每窗口 ~4r 个节点),仅适合 3 天临时效果。**方案 A 失败时才考虑。**
+- 已知退化:极窄窗口(`min(fw,fh) < 2·size`)四角纹理可能彼此重叠,半透明边框在该处会叠加两次;不透明边框无差异。
+- 全屏/无边框窗口(`width=0` 或不画边):禁用全部节点,与现状等价。
 
 **配置入口(待定,见 Open Questions):**
 
@@ -53,7 +48,7 @@ Doc:   zig build -Dmanual    # (如有)
 ## Project Structure
 
 ```
-river/Window.zig        → drawBorders() 重写为纹理填充;Border 渲染逻辑所在(唯一改动核心)
+river/Window.zig        → drawBorders() 重写为"边条 rect + 四角小纹理";Border 渲染逻辑所在(唯一改动核心)
 river/                → 若引入覆盖度计算,优先内联于 Window.zig,避免新文件
 SPEC-rounded-window-borders.md → 本文档
 ```
@@ -73,7 +68,7 @@ const cov: u8 = @intFromFloat(@max(0, @min(1, r - dist)) * 255);
 ## Testing Strategy
 
 - 现有 `zig build test` 保持不变,不引入测试框架。
-- 新增一个 `assert` 自检(如 `Window.zig` 内 `test "rounded corner coverage"`):对角区像素做几何断言(角点外像素 alpha=0、圆弧内侧 alpha=255、过渡带 0<alpha<255),保证覆盖度公式不回归。
+- 新增 `assert` 自检(`Window.zig` 内 `test "rounded border corner coverage"` 等):对角区像素做几何断言(角点外像素 alpha=0、圆弧内侧 alpha=255、过渡带 0<alpha<255),保证覆盖度公式不回归;`test "border geometry covers exactly the ring"` 逐像素验证"边条 rect ∪ 四角方块"恰好等于环覆盖非零区且无重叠;`test "border geometry keeps the strips clear of the corners"` 固定几何数值。
 - 视觉验证(人工,计入成功标准):`river` 起合成器,开几个带边框窗口,检查四角、半透明边框、平铺相邻边、拖拽。
 
 ## Boundaries
