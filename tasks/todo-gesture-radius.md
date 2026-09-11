@@ -2,11 +2,13 @@
 
 ## G3 — Extract gesture state machine
 
-- [ ] Create `river/Gesture.zig` with `DeviceState`, `Release`, `Action`, `Gestures`
-- [ ] Move `handleSwipe*`, `handlePinch*`, `handleHold*`, `naturalScroll` to Gesture.zig
-- [ ] Update `Seat.zig` adapter to call Gesture methods and execute Actions
-- [ ] Verify `zig build test` passes (existing tests)
-- [ ] `zig fmt` clean
+- [x] Create `river/Gesture.zig` with `DeviceState`, `Effects`, `Action`, `Gestures`
+- [x] Move the swipe/hold/pinch decision logic to Gesture.zig; keep the binding release and
+      `naturalScroll()` in Seat.zig (they need compositor state)
+- [x] Update the `Seat.zig` adapter to call the state machine and execute its actions
+- [x] Wire `river/Gesture.zig` into the test module; cover bridging, cancelled, sub-threshold,
+      per-device isolation and unmapped finger counts
+- [x] Verify `zig build test` passes (15/15) and `zig fmt` clean
 
 ## RC4 — HiDPI corner textures
 

@@ -333,5 +333,6 @@ export fn river_wlroots_log_callback(importance: wlr.log.Importance, ptr: [*:0]c
 
 test {
     _ = @import("Window.zig");
+    _ = @import("Gesture.zig");
     _ = @import("gesture_config.zig");
 }
