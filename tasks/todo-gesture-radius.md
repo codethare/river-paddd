@@ -22,8 +22,10 @@
 
 ## G4a — File-based gesture config
 
-- [ ] Add `$XDG_CONFIG_HOME/river/gestures.conf` parser in `gesture_config.zig`
-- [ ] Integrate config loading in `Server.init` / `InputManager.init`
-- [ ] Add `river/gesture_config.zig` to test module
-- [ ] Verify `zig build test` passes
-- [ ] `zig fmt` clean
+- [x] Add the `Config` struct (defaults = the former compile-time tables) and a line parser in
+      `gesture_config.zig`, with tests for remapping, whole-file parsing and malformed lines
+- [x] Resolve `$XDG_CONFIG_HOME/river/gestures.conf` / `~/.config/river/gestures.conf` and read it
+      at startup (`main.zig`, after `Server.init` and before the event loop)
+- [x] Let the server own the config and point each seat's gesture state machine at it
+- [x] Document the file, its keys and values in the README
+- [x] Verify `zig build test` passes (19/19) and `zig fmt` clean

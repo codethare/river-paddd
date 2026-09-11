@@ -292,7 +292,7 @@ pub fn create(name: [*:0]const u8, transient: ?*ext.TransientSeatV1) !void {
         .link_sent = undefined,
         .xkb_bindings = undefined,
         .pointer_bindings = undefined,
-        .gestures = Gesture.Gestures.init(util.gpa),
+        .gestures = Gesture.Gestures.init(util.gpa, &server.gesture_config),
         .cursor = undefined,
         .relay = undefined,
         .keyboard_groups = undefined,

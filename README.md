@@ -38,9 +38,33 @@ mapped to a reserved keysym:
 | 4       | F5 | F6   | F7   | F8    |
 
 Because the synthesized keys go through river's existing keybinding stack, any
-window manager (or riverctl binding) can bind them like ordinary keysyms. The
-mapping lives in `river/gesture_config.zig`; see `route-a-gesture-patch-plan.md`
-for the design rationale.
+window manager (or riverctl binding) can bind them like ordinary keysyms. Holds
+are sustained presses: 3 fingers press `BTN_SIDE` (0x113), 4 fingers press F10.
+Four-finger pinch-in/out fire F12/F11.
+
+The mapping defaults to the table above and can be overridden in
+`$XDG_CONFIG_HOME/river/gestures.conf` (or `~/.config/river/gestures.conf`),
+which is read at startup:
+
+```
+# gestures.conf
+enabled = true
+3up = F1
+3left = F3
+4right = F8
+hold3 = button:0x113
+hold4 = F10
+pinch3in = none
+pinch4in = F12
+pinch4out = F11
+```
+
+Keys are `enabled`, `<3|4><up|down|left|right>`, `hold<3|4>` and
+`pinch<3|4><in|out>`; values are xkbcommon keysym names (case insensitive),
+`button:<evdev code>` for holds, or `none` to unmap. Malformed lines are logged
+and skipped, and a missing file leaves the defaults in place. See
+`river/gesture_config.zig` for the parser and `tasks/plan-gesture-radius.md` for
+the design rationale.
 
 Window borders are drawn with rounded outer corners (radius up to 10px,
 clamped per window so the square content corners stay inside the arc) using

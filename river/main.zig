@@ -17,6 +17,7 @@ const flags = @import("flags");
 
 const util = @import("util.zig");
 const process = @import("process.zig");
+const GestureConfig = @import("gesture_config.zig");
 
 const Server = @import("Server.zig");
 
@@ -146,6 +147,10 @@ pub fn main(init: std.process.Init.Minimal) anyerror!void {
 
     try server.init(runtime_xwayland);
     defer server.deinit();
+
+    // Apply any gestures.conf overrides after server.init() has set the
+    // defaults, and before the event loop can process input events.
+    GestureConfig.load(&server.gesture_config, io, init.environ);
 
     // wlroots starts the Xwayland process from an idle event source, the reasoning being that
     // this gives the compositor time to set up event listeners before Xwayland is actually

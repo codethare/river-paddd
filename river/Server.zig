@@ -16,6 +16,7 @@ const wp = wayland.server.wp;
 const util = @import("util.zig");
 
 const IdleInhibitManager = @import("IdleInhibitManager.zig");
+const GestureConfig = @import("gesture_config.zig");
 const InputManager = @import("InputManager.zig");
 const LockManager = @import("LockManager.zig");
 const Output = @import("Output.zig");
@@ -95,6 +96,7 @@ scene: Scene,
 input_manager: InputManager,
 libinput_config: LibinputConfig,
 xkb_config: XkbConfig,
+gesture_config: GestureConfig.Config = .{},
 om: OutputManager,
 idle_inhibit_manager: IdleInhibitManager,
 lock_manager: LockManager,

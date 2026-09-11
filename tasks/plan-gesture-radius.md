@@ -45,17 +45,23 @@ and makes G4a's runtime remap trivial to test.
 **Why:** Remapping gestures today requires recompiling. A config file lets users change
 bindings without touching the compositor.
 
-**Design:** `$XDG_CONFIG_HOME/river/gestures.conf` (or `~/.config/river/gestures.conf`).
+**Design:** `$XDG_CONFIG_HOME/river/gestures.conf` (or `~/.config/river/gestures.conf`),
+read once at startup.
 
-Line format: `enabled = true/false`, `3up = F1`, `3down = F2`, `hold3 = button:0x113`,
-`pinch4out = F11`, etc. Parse at startup; malformed lines logged and skipped.
+Line format: `enabled = true/false`, `3up = F1`, `4right = none`, `hold3 = button:0x113`,
+`pinch4out = F11`. Values are xkbcommon keysym names (case insensitive) or
+`button:<evdev code>` for holds; `none` unmaps an entry. Malformed lines are logged and
+skipped, and a missing file leaves the compiled defaults in place.
 
-- Read at compositor init (in `Server.init` or gesture map creation).
-- Override the compiled defaults in `GestureConfig`.
-- Missing file → compiled defaults unchanged.
-- Reload: `Super+G` hotkey or compositor restart (no runtime reload to keep it simple).
+- `GestureConfig.Config` holds the mapping, with the former compile-time tables as its
+  defaults. `parseLine`/`parse` are pure and unit tested; `load` resolves the XDG path and
+  reads the file.
+- The server owns the loaded config; each seat's `Gestures` points at it, so the mapping is
+  read live.
+- Reloading requires a restart (no hotkey, no runtime reload).
 
-**Files:** `river/gesture_config.zig` (parser + config loading), `river/Server.zig` (init call).
+**Files:** `river/gesture_config.zig` (config + parser + loader), `river/Server.zig` (field),
+`river/main.zig` (startup load), `river/Gesture.zig` (consumes the config), `README.md`.
 
 ## Order & gates
 
