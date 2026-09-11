@@ -62,7 +62,8 @@ pinch4out = F11
 Keys are `enabled`, `<3|4><up|down|left|right>`, `hold<3|4>` and
 `pinch<3|4><in|out>`; values are xkbcommon keysym names (case insensitive),
 `button:<evdev code>` for holds, or `none` to unmap. Malformed lines are logged
-and skipped, and a missing file leaves the defaults in place. See
+and skipped, and a missing file leaves the defaults in place. A commented sample
+listing every key with its default is shipped in `doc/gestures.conf`; see
 `river/gesture_config.zig` for the parser and `tasks/plan-gesture-radius.md` for
 the design rationale.
 
