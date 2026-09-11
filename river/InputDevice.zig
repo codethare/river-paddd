@@ -163,6 +163,7 @@ pub fn deinit(device: *InputDevice) void {
 pub fn assignToSeat(device: *InputDevice, new: *Seat) void {
     const old = device.seat;
     if (new == old) return;
+    old.forgetGestures(device.wlr_device);
     old.detachDevice(device);
     new.attachDevice(device);
     old.updateCapabilities();
@@ -196,6 +197,7 @@ fn handleRemove(listener: *wl.Listener(*wlr.InputDevice), _: *wlr.InputDevice) v
             keyboard.deviceDestroy();
         },
         .pointer, .touch => {
+            device.seat.forgetGestures(device.wlr_device);
             device.deinit();
             util.gpa.destroy(device);
         },

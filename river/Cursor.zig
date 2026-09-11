@@ -870,6 +870,7 @@ fn queueFrame(listener: *wl.Listener(*wlr.Cursor), _: *wlr.Cursor) void {
 fn queuePinchBegin(listener: *wl.Listener(*wlr.Pointer.event.PinchBegin), event: *wlr.Pointer.event.PinchBegin) void {
     const cursor: *Cursor = @fieldParentPtr("pinch_begin", listener);
     cursor.seat.queueEvent(.{ .pointer_pinch_begin = .{
+        .device = event.device,
         .time_msec = event.time_msec,
         .fingers = event.fingers,
     } }) catch {};
@@ -878,6 +879,7 @@ fn queuePinchBegin(listener: *wl.Listener(*wlr.Pointer.event.PinchBegin), event:
 fn queuePinchUpdate(listener: *wl.Listener(*wlr.Pointer.event.PinchUpdate), event: *wlr.Pointer.event.PinchUpdate) void {
     const cursor: *Cursor = @fieldParentPtr("pinch_update", listener);
     cursor.seat.queueEvent(.{ .pointer_pinch_update = .{
+        .device = event.device,
         .time_msec = event.time_msec,
         .fingers = event.fingers,
         .dx = event.dx,
@@ -890,6 +892,7 @@ fn queuePinchUpdate(listener: *wl.Listener(*wlr.Pointer.event.PinchUpdate), even
 fn queuePinchEnd(listener: *wl.Listener(*wlr.Pointer.event.PinchEnd), event: *wlr.Pointer.event.PinchEnd) void {
     const cursor: *Cursor = @fieldParentPtr("pinch_end", listener);
     cursor.seat.queueEvent(.{ .pointer_pinch_end = .{
+        .device = event.device,
         .time_msec = event.time_msec,
         .cancelled = event.cancelled,
     } }) catch {};
@@ -927,6 +930,7 @@ fn queueSwipeEnd(listener: *wl.Listener(*wlr.Pointer.event.SwipeEnd), event: *wl
 fn queueHoldBegin(listener: *wl.Listener(*wlr.Pointer.event.HoldBegin), event: *wlr.Pointer.event.HoldBegin) void {
     const cursor: *Cursor = @fieldParentPtr("hold_begin", listener);
     cursor.seat.queueEvent(.{ .pointer_hold_begin = .{
+        .device = event.device,
         .time_msec = event.time_msec,
         .fingers = event.fingers,
     } }) catch {};
@@ -935,6 +939,7 @@ fn queueHoldBegin(listener: *wl.Listener(*wlr.Pointer.event.HoldBegin), event: *
 fn queueHoldEnd(listener: *wl.Listener(*wlr.Pointer.event.HoldEnd), event: *wlr.Pointer.event.HoldEnd) void {
     const cursor: *Cursor = @fieldParentPtr("hold_end", listener);
     cursor.seat.queueEvent(.{ .pointer_hold_end = .{
+        .device = event.device,
         .time_msec = event.time_msec,
         .cancelled = event.cancelled,
     } }) catch {};
