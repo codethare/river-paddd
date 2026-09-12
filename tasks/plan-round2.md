@@ -128,14 +128,21 @@ geometry as today.
 
 ### G-perf-1 — Drag ratio knob
 
-**Why:** The bridged drag goes through `Cursor.move` → `warpClosest` (`Cursor.zig:413`), which
-bypasses libinput pointer acceleration and is therefore a fixed 1:1 mapping in layout
-coordinates; on a HiDPI output the same finger movement feels slower than a mouse drag.
+**Why:** The bridged drag feeds libinput's gesture deltas straight to
+`Cursor.move` (`Seat.zig:457`) as if they were layout pixels. They are not: libinput
+normalizes them to a 1000 dpi device (`/usr/include/libinput.h`), i.e. 1 unit is 1/1000 inch
+of finger travel, and libinput has already applied pointer acceleration. So one inch of finger
+travel moves the cursor 1000 layout pixels, which is 6 inches on a 163 dpi output at scale 1
+and 12 inches at scale 2: the drag is much too fast, and faster the higher the scale.
 
-**Design:** a `drag_sensitivity` key (default 1.0), optionally normalized by the scale of the
-output under the cursor.
+**Design:** a `drag_sensitivity` key (default 1.0, i.e. today's mapping) multiplied into the
+drag delta, divided by the scale of the output under the cursor so 1x and 2x feel the same.
+The scale is passed into the pure state machine (`swipeUpdate(device, dx, dy, scale)`) so the
+math is unit tested. The default is deliberately uncalibrated: the state machine logs the
+accumulated units per gesture at debug level, so a measured finger travel (5 cm is about 1970
+units) can be turned into a value.
 
-**Files:** `river/Seat.zig`, `river/Cursor.zig`, `river/gesture_config.zig`.
+**Files:** `river/Seat.zig`, `river/Gesture.zig`, `river/gesture_config.zig`, `README.md`.
 
 ### RC-simplify-1 — One corner texture rotated four ways
 

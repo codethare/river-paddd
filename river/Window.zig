@@ -64,8 +64,6 @@ pub const Border = struct {
     a: u32 = 0,
 };
 
-/// Radius in pixels of the rounded corners drawn on window borders. Configurable
-/// in gestures.conf, see SPEC-rounded-window-borders.md.
 /// A premultiplied ARGB8888 image of a window's border frame, uploaded to the
 /// GPU as a custom wlr.Buffer. wlroots 0.20 has no rounded-rect scene primitive,
 /// so the rounded corners are rendered into this texture.

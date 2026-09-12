@@ -65,7 +65,9 @@ Keys are `enabled`, `swipe_threshold`, `pinch_threshold`,
 takes an xkbcommon keysym name (case insensitive), a mouse button as
 `button:<evdev code>`, or `none` to unmap, so a gesture can fire either a window
 manager key binding (keysym) or one of its pointer bindings (mouse button); the
-two thresholds take numbers. Malformed lines are logged and skipped, and a
+two thresholds take numbers. Swipe deltas are libinput's 1000 dpi normalized
+ones, so `swipe_threshold = 10` is only 0.25 mm of finger travel. Malformed
+lines are logged and skipped, and a
 missing file leaves the defaults in place. A commented sample listing every key
 with its default is
 shipped in `doc/gestures.conf`; see
