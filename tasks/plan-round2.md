@@ -97,7 +97,11 @@ argument). Rounding to one decimal is enough.
 
 **Why:** `border_radius` is a constant (`Window.zig:69`); the config file already exists.
 
-**Design:** a `border_radius` key in the same file, read by `drawBorders`.
+**Design:** a `border_radius` key in the same file, read by `drawBorders`. The key is also
+added to the border cache key so a reload re-renders the corners without any other change.
+The setting lives in `gestures.conf` / `gesture_config.zig` because that is the compositor's
+only config file; renaming both to `river.conf` / `config.zig` is a possible follow-up, but it
+touches the module alias in every importer.
 
 **Note:** the radius stays clamped by `overflowFreeRadius(bw)` (`Window.zig:1324`) so the
 content's square corners cannot poke out of the rounded outline: `bw=3` caps the radius at 11,
@@ -146,7 +150,7 @@ texture per edge pair. Medium complexity: adds a transform-dependent path.
 ## Progress
 
 - Batch A: RC-fix-1 done, G-fix-1 done, G-ux-2a done.
-- Batch B: not started (G-ux-1, G-threshold-1, RC5-lite).
+- Batch B: G-ux-1 done, G-threshold-1 done, RC5-lite done.
 - Batch C: not started, measure first.
 
 ## Order & gates
