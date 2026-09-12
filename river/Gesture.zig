@@ -57,6 +57,15 @@ pub const Effects = struct {
     action: Action = .none,
 };
 
+/// Action for a configured target: the gesture may fire a key or a mouse
+/// button depending on how the user mapped it.
+fn targetAction(target: GestureConfig.Target) Action {
+    return switch (target) {
+        .key => |keysym| .{ .key = keysym },
+        .button => |button| .{ .button = button },
+    };
+}
+
 pub const Gestures = struct {
     alloc: std.mem.Allocator,
     /// Runtime mapping, owned by the server.
@@ -144,8 +153,8 @@ pub const Gestures = struct {
 
         const fingers_index = GestureConfig.fingerIndex(fingers) orelse return .{};
         const direction = GestureConfig.resolveDirection(dx, dy, natural_scroll) orelse return .{};
-        const keysym = self.config.swipe[fingers_index][@intFromEnum(direction)] orelse return .{};
-        return .{ .action = .{ .key = keysym } };
+        const target = self.config.swipe[fingers_index][@intFromEnum(direction)] orelse return .{};
+        return .{ .action = targetAction(target) };
     }
 
     pub fn holdBegin(self: *Gestures, wlr_device: *wlr.InputDevice, fingers: u32) Effects {
@@ -161,10 +170,7 @@ pub const Gestures = struct {
         const target = self.config.hold[GestureConfig.fingerIndex(fingers).?] orelse {
             return .{ .release = release };
         };
-        return .{ .release = release, .action = switch (target) {
-            .key => |keysym| .{ .key = keysym },
-            .button => |button| .{ .button = button },
-        } };
+        return .{ .release = release, .action = targetAction(target) };
     }
 
     pub fn holdEnd(
@@ -239,8 +245,8 @@ pub const Gestures = struct {
             return .{};
 
         const fingers_index = GestureConfig.fingerIndex(fingers) orelse return .{};
-        const keysym = self.config.pinch[fingers_index][@intFromEnum(direction)] orelse return .{};
-        return .{ .action = .{ .key = keysym } };
+        const target = self.config.pinch[fingers_index][@intFromEnum(direction)] orelse return .{};
+        return .{ .action = targetAction(target) };
     }
 };
 
@@ -369,7 +375,7 @@ test "pinch maps to keys and unmapped pinches are consumed" {
 
 test "runtime config changes the mapping" {
     var config = GestureConfig.default_config;
-    config.swipe[0][@intFromEnum(GestureConfig.Direction.up)] = .F13;
+    config.swipe[0][@intFromEnum(GestureConfig.Direction.up)] = .{ .key = .F13 };
     var gestures = Gestures.init(std.testing.allocator, &config);
     defer gestures.deinit();
 
@@ -383,6 +389,33 @@ test "runtime config changes the mapping" {
     try std.testing.expect(gestures.swipeBegin(device_a, 3).action == .forward);
     try std.testing.expect(gestures.holdBegin(device_a, 3).action == .forward);
     try std.testing.expect(gestures.pinchBegin(device_a, 4).action == .forward);
+}
+
+test "a swipe or pinch can fire a mouse button" {
+    var config = GestureConfig.default_config;
+    config.swipe[0][@intFromEnum(GestureConfig.Direction.left)] = .{ .button = 0x113 };
+    config.pinch[1][@intFromEnum(GestureConfig.PinchDirection.out)] = .{ .button = 0x114 };
+    var gestures = Gestures.init(std.testing.allocator, &config);
+    defer gestures.deinit();
+
+    try std.testing.expect(gestures.swipeBegin(device_a, 3).action == .none);
+    try std.testing.expect(gestures.swipeUpdate(device_a, -50, 0).action == .none);
+    try expectButton(gestures.swipeEnd(device_a, false, false), 0x113);
+
+    try std.testing.expect(gestures.pinchBegin(device_a, 4).action == .none);
+    try std.testing.expect(gestures.pinchUpdate(device_a, 1.2).action == .none);
+    try expectButton(gestures.pinchEnd(device_a, false), 0x114);
+
+    // Other directions keep their defaults, an explicitly unmapped one is
+    // consumed silently.
+    try std.testing.expect(gestures.swipeBegin(device_a, 4).action == .none);
+    try std.testing.expect(gestures.swipeUpdate(device_a, 50, 0).action == .none);
+    try expectKey(gestures.swipeEnd(device_a, false, false), .F8);
+
+    config.swipe[0][@intFromEnum(GestureConfig.Direction.right)] = null;
+    try std.testing.expect(gestures.swipeBegin(device_a, 3).action == .none);
+    try std.testing.expect(gestures.swipeUpdate(device_a, 50, 0).action == .none);
+    try std.testing.expect(gestures.swipeEnd(device_a, false, false).action == .none);
 }
 
 test "untaken finger counts are forwarded" {

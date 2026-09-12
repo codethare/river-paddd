@@ -51,6 +51,7 @@ which is read at startup:
 enabled = true
 3up = F1
 3left = F3
+3right = button:0x116
 4right = F8
 hold3 = button:0x113
 hold4 = F10
@@ -60,10 +61,12 @@ pinch4out = F11
 ```
 
 Keys are `enabled`, `<3|4><up|down|left|right>`, `hold<3|4>` and
-`pinch<3|4><in|out>`; values are xkbcommon keysym names (case insensitive),
-`button:<evdev code>` for holds, or `none` to unmap. Malformed lines are logged
-and skipped, and a missing file leaves the defaults in place. A commented sample
-listing every key with its default is shipped in `doc/gestures.conf`; see
+`pinch<3|4><in|out>`. Any of them takes an xkbcommon keysym name (case
+insensitive), a mouse button as `button:<evdev code>`, or `none` to unmap, so a
+gesture can drive the window manager (keysym) or an application directly (mouse
+button). Malformed lines are logged and skipped, and a missing file leaves the
+defaults in place. A commented sample listing every key with its default is
+shipped in `doc/gestures.conf`; see
 `river/gesture_config.zig` for the parser and `tasks/plan-gesture-radius.md` for
 the design rationale.
 

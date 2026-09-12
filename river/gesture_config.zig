@@ -25,7 +25,8 @@ pub const PinchDirection = enum {
     out,
 };
 
-pub const HoldTarget = union(enum) {
+/// What a gesture triggers: a synthesized key press or an evdev mouse button.
+pub const Target = union(enum) {
     key: xkb.Keysym,
     /// evdev button code (linux/input-event-codes.h BTN_*), e.g. BTN_SIDE = 0x113.
     button: u32,
@@ -39,22 +40,22 @@ pub const Config = struct {
     /// when unbound.
     enabled: bool = true,
 
-    /// Swipe keysyms, indexed by [finger index][direction].
-    swipe: [2][4]?xkb.Keysym = .{
-        .{ .F1, .F2, .F3, .F4 },
-        .{ .F5, .F6, .F7, .F8 },
+    /// Swipe targets, indexed by [finger index][direction].
+    swipe: [2][4]?Target = .{
+        .{ .{ .key = .F1 }, .{ .key = .F2 }, .{ .key = .F3 }, .{ .key = .F4 } },
+        .{ .{ .key = .F5 }, .{ .key = .F6 }, .{ .key = .F7 }, .{ .key = .F8 } },
     },
 
     /// Hold targets, indexed by finger index.
-    hold: [2]?HoldTarget = .{
+    hold: [2]?Target = .{
         .{ .button = 0x113 }, // BTN_SIDE
         .{ .key = .F10 },
     },
 
-    /// Pinch keysyms, indexed by [finger index][PinchDirection].
-    pinch: [2][2]?xkb.Keysym = .{
+    /// Pinch targets, indexed by [finger index][PinchDirection].
+    pinch: [2][2]?Target = .{
         .{ null, null },
-        .{ .F12, .F11 },
+        .{ .{ .key = .F12 }, .{ .key = .F11 } },
     },
 };
 
@@ -192,13 +193,13 @@ pub fn parseLine(config: *Config, line: []const u8) ParseError!void {
             .right
         else
             return error.UnknownKey;
-        config.swipe[try fingerIndexFromChar(key[0])][@intFromEnum(direction)] = try parseKeysymOrNone(value);
+        config.swipe[try fingerIndexFromChar(key[0])][@intFromEnum(direction)] = try parseTarget(value);
         return;
     }
 
     // Holds: hold3, hold4
     if (std.mem.startsWith(u8, key, "hold") and key.len == 5) {
-        config.hold[try fingerIndexFromChar(key[4])] = try parseHoldTarget(value);
+        config.hold[try fingerIndexFromChar(key[4])] = try parseTarget(value);
         return;
     }
 
@@ -210,7 +211,7 @@ pub fn parseLine(config: *Config, line: []const u8) ParseError!void {
             .out
         else
             return error.UnknownKey;
-        config.pinch[try fingerIndexFromChar(key[5])][@intFromEnum(direction)] = try parseKeysymOrNone(value);
+        config.pinch[try fingerIndexFromChar(key[5])][@intFromEnum(direction)] = try parseTarget(value);
         return;
     }
 
@@ -225,12 +226,6 @@ fn fingerIndexFromChar(char: u8) ParseError!usize {
     };
 }
 
-/// Parse a keysym name (xkbcommon names, case insensitive) or `none` to unmap.
-fn parseKeysymOrNone(value: []const u8) ParseError!?xkb.Keysym {
-    if (std.mem.eql(u8, value, "none")) return null;
-    return try parseKeysym(value);
-}
-
 fn parseKeysym(value: []const u8) ParseError!xkb.Keysym {
     var name: [64]u8 = undefined;
     if (value.len >= name.len) return error.InvalidKeysym;
@@ -243,7 +238,7 @@ fn parseKeysym(value: []const u8) ParseError!xkb.Keysym {
 }
 
 /// Parse `none`, `button:<evdev code>` or a keysym name.
-fn parseHoldTarget(value: []const u8) ParseError!?HoldTarget {
+fn parseTarget(value: []const u8) ParseError!?Target {
     if (std.mem.eql(u8, value, "none")) return null;
     if (std.mem.startsWith(u8, value, "button:")) {
         const code = std.fmt.parseInt(u32, value["button:".len..], 0) catch return error.InvalidButton;
@@ -260,26 +255,33 @@ test "gesture config remaps single entries" {
     try parseLine(&config, "");
     try parseLine(&config, "  enabled = false  ");
     try parseLine(&config, "3up = F5");
+    try parseLine(&config, "3right = button:0x116");
     try parseLine(&config, "4right = none");
     try parseLine(&config, "hold3 = button:0x114");
     try parseLine(&config, "hold4 = Return");
     try parseLine(&config, "pinch4out = Escape");
+    try parseLine(&config, "pinch3in = button:0x110");
     try parseLine(&config, "pinch4in = none");
 
     try testing.expect(!config.enabled);
-    try testing.expectEqual(@as(?xkb.Keysym, .F5), config.swipe[0][@intFromEnum(Direction.up)]);
-    try testing.expectEqual(@as(?xkb.Keysym, null), config.swipe[1][@intFromEnum(Direction.right)]);
+    try testing.expectEqual(@as(?Target, .{ .key = .F5 }), config.swipe[0][@intFromEnum(Direction.up)]);
+    try testing.expectEqual(@as(?Target, .{ .button = 0x116 }), config.swipe[0][@intFromEnum(Direction.right)]);
+    try testing.expectEqual(@as(?Target, null), config.swipe[1][@intFromEnum(Direction.right)]);
     try testing.expectEqual(@as(u32, 0x114), config.hold[0].?.button);
     try testing.expectEqual(xkb.Keysym.Return, config.hold[1].?.key);
     try testing.expectEqual(
-        @as(?xkb.Keysym, .Escape),
+        @as(?Target, .{ .key = .Escape }),
         config.pinch[1][@intFromEnum(PinchDirection.out)],
     );
-    try testing.expectEqual(@as(?xkb.Keysym, null), config.pinch[1][@intFromEnum(PinchDirection.in)]);
+    try testing.expectEqual(
+        @as(?Target, .{ .button = 0x110 }),
+        config.pinch[0][@intFromEnum(PinchDirection.in)],
+    );
+    try testing.expectEqual(@as(?Target, null), config.pinch[1][@intFromEnum(PinchDirection.in)]);
 
     // Untouched entries keep their defaults.
-    try testing.expectEqual(@as(?xkb.Keysym, .F2), config.swipe[0][@intFromEnum(Direction.down)]);
-    try testing.expectEqual(@as(?xkb.Keysym, .F5), config.swipe[1][@intFromEnum(Direction.up)]);
+    try testing.expectEqual(@as(?Target, .{ .key = .F2 }), config.swipe[0][@intFromEnum(Direction.down)]);
+    try testing.expectEqual(@as(?Target, .{ .key = .F5 }), config.swipe[1][@intFromEnum(Direction.up)]);
 }
 
 test "gesture config parses a whole file and skips bad lines" {
@@ -296,7 +298,7 @@ test "gesture config parses a whole file and skips bad lines" {
     );
 
     try testing.expect(!config.enabled);
-    try testing.expectEqual(@as(?xkb.Keysym, .F5), config.swipe[0][@intFromEnum(Direction.up)]);
+    try testing.expectEqual(@as(?Target, .{ .key = .F5 }), config.swipe[0][@intFromEnum(Direction.up)]);
     // The bad line is skipped, later lines still apply.
     try testing.expectEqual(@as(u32, 0x114), config.hold[1].?.button);
 }
@@ -312,8 +314,9 @@ test "gesture config rejects malformed lines without changing the defaults" {
     try testing.expectError(error.UnknownValue, parseLine(&config, "enabled = maybe"));
     try testing.expectError(error.InvalidKeysym, parseLine(&config, "3up = NotAKeysym"));
     try testing.expectError(error.InvalidButton, parseLine(&config, "hold3 = button:zzz"));
+    try testing.expectError(error.InvalidButton, parseLine(&config, "3left = button:zzz"));
 
     try testing.expect(config.enabled);
-    try testing.expectEqual(@as(?xkb.Keysym, .F1), config.swipe[0][@intFromEnum(Direction.up)]);
+    try testing.expectEqual(@as(?Target, .{ .key = .F1 }), config.swipe[0][@intFromEnum(Direction.up)]);
     try testing.expectEqual(@as(u32, 0x113), config.hold[0].?.button);
 }
