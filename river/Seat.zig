@@ -587,6 +587,13 @@ fn injectGestureKey(seat: *Seat, keysym: xkb.Keysym) void {
         binding.pressed();
         return;
     }
+
+    var buffer: [64]u8 = undefined;
+    const len = keysym.getName(&buffer, buffer.len);
+    log.debug("gesture key {d}({s}) is unbound, swallowed", .{
+        @intFromEnum(keysym),
+        buffer[0..@max(0, len)],
+    });
 }
 
 /// Fire the window manager pointer binding for `button`, or consume the
@@ -598,6 +605,8 @@ fn injectGestureButton(seat: *Seat, button: u32) void {
         // Send the press now; the release follows at hold_end.
         seat.pending_gesture_release = .{ .button = binding };
         binding.pressed();
+    } else {
+        log.debug("gesture button {d} is unbound, swallowed", .{button});
     }
 }
 
