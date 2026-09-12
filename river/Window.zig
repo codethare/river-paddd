@@ -64,10 +64,8 @@ pub const Border = struct {
     a: u32 = 0,
 };
 
-/// Radius in pixels of the rounded corners drawn on window borders.
-/// Fixed compositor-side value, see SPEC-rounded-window-borders.md.
-const border_radius: u31 = 10;
-
+/// Radius in pixels of the rounded corners drawn on window borders. Configurable
+/// in gestures.conf, see SPEC-rounded-window-borders.md.
 /// A premultiplied ARGB8888 image of a window's border frame, uploaded to the
 /// GPU as a custom wlr.Buffer. wlroots 0.20 has no rounded-rect scene primitive,
 /// so the rounded corners are rendered into this texture.
@@ -463,6 +461,9 @@ border: struct {
 border_rendered: struct {
     valid: bool = false,
     scale: f64 = 1,
+    /// Configured radius, which the render below is then clamped for the window
+    /// size: a reload can change it without changing anything else.
+    border_radius: u31 = 0,
     width: u31 = 0,
     r: u32 = 0,
     g: u32 = 0,
@@ -1303,6 +1304,7 @@ fn drawBorders(window: *Window) void {
     // sequence (this function runs for every window on every sequence).
     const cached = &window.border_rendered;
     if (cached.valid and cached.scale == scale and cached.width == border.width and
+        cached.border_radius == server.gesture_config.border_radius and
         cached.r == border.r and cached.g == border.g and
         cached.b == border.b and cached.a == border.a and
         cached.edges == @as(u32, @bitCast(edges)) and
@@ -1330,7 +1332,7 @@ fn drawBorders(window: *Window) void {
     // corner stays inside the arc as long as
     // r <= (bw + 0.5) * (2 + sqrt(2)).
     const radius: usize = @min(
-        @as(usize, border_radius),
+        @as(usize, server.gesture_config.border_radius),
         @min(@min(frame_width, frame_height), overflowFreeRadius(border_width)),
     );
     const geometry = borderGeometry(content_width, content_height, border_width, radius, edges);
@@ -1402,6 +1404,7 @@ fn drawBorders(window: *Window) void {
     cached.* = .{
         .valid = true,
         .scale = scale,
+        .border_radius = server.gesture_config.border_radius,
         .width = border.width,
         .r = border.r,
         .g = border.g,

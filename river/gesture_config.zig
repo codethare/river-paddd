@@ -49,6 +49,10 @@ pub const Config = struct {
     /// out (1 + threshold).
     pinch_threshold: f64 = 0.05,
 
+    /// Radius in pixels of the rounded corners drawn on window borders. Clamped
+    /// per window so the content's square corners stay inside the arc.
+    border_radius: u31 = 10,
+
     /// Swipe targets, indexed by [finger index][direction].
     swipe: [2][4]?Target = .{
         .{ .{ .key = .F1 }, .{ .key = .F2 }, .{ .key = .F3 }, .{ .key = .F4 } },
@@ -116,6 +120,7 @@ pub const ParseError = error{
     InvalidKeysym,
     InvalidButton,
     InvalidThreshold,
+    InvalidRadius,
 };
 
 /// Path of the gesture config file, per the XDG base directory specification.
@@ -206,6 +211,11 @@ pub fn parseLine(config: *Config, line: []const u8) ParseError!void {
 
     if (std.mem.eql(u8, key, "pinch_threshold")) {
         config.pinch_threshold = try parseThreshold(value);
+        return;
+    }
+
+    if (std.mem.eql(u8, key, "border_radius")) {
+        config.border_radius = std.fmt.parseInt(u31, value, 0) catch return error.InvalidRadius;
         return;
     }
 
@@ -337,6 +347,58 @@ test "gesture config parses a whole file and skips bad lines" {
     try testing.expectEqual(@as(?Target, .{ .key = .F5 }), config.swipe[0][@intFromEnum(Direction.up)]);
     // The bad line is skipped, later lines still apply.
     try testing.expectEqual(@as(u32, 0x114), config.hold[1].?.button);
+}
+
+test "reload re-reads the file that load resolved" {
+    const testing = std.testing;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Point the module at a file we control instead of going through the
+    // environment; load() resolves the same way.
+    var dir_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = dir_buffer[0..try tmp.dir.realPath(io, &dir_buffer)];
+    config_path = try std.fmt.bufPrint(&config_path_buffer, "{s}/gestures.conf", .{dir_path});
+
+    var config: Config = default_config;
+
+    // No file yet: the defaults stay in place.
+    reload(&config, io);
+    try testing.expectEqual(@as(u31, 10), config.border_radius);
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "gestures.conf",
+        .data = "border_radius = 3\n3up = F13\n",
+    });
+    reload(&config, io);
+    try testing.expectEqual(@as(u31, 3), config.border_radius);
+    try testing.expectEqual(@as(?Target, .{ .key = .F13 }), config.swipe[0][@intFromEnum(Direction.up)]);
+
+    // An edited file is picked up by the next reload, and entries it no longer
+    // mentions keep the value the previous reload set.
+    try tmp.dir.writeFile(io, .{ .sub_path = "gestures.conf", .data = "border_radius = 7\n" });
+    reload(&config, io);
+    try testing.expectEqual(@as(u31, 7), config.border_radius);
+    try testing.expectEqual(@as(?Target, .{ .key = .F13 }), config.swipe[0][@intFromEnum(Direction.up)]);
+}
+
+test "gesture config takes a border radius" {
+    const testing = std.testing;
+
+    var config = default_config;
+    try testing.expectEqual(@as(u31, 10), config.border_radius);
+
+    try parseLine(&config, "border_radius = 12");
+    try testing.expectEqual(@as(u31, 12), config.border_radius);
+
+    // 0 is allowed: square corners are a choice, not a typo.
+    try parseLine(&config, "border_radius = 0");
+    try testing.expectEqual(@as(u31, 0), config.border_radius);
+
+    try testing.expectError(error.InvalidRadius, parseLine(&config, "border_radius = round"));
+    try testing.expectError(error.InvalidRadius, parseLine(&config, "border_radius = -1"));
 }
 
 test "gesture config rejects malformed lines without changing the defaults" {
