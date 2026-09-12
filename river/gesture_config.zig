@@ -126,11 +126,25 @@ fn configPath(environ: std.process.Environ, buffer: []u8) ?[]const u8 {
     return null;
 }
 
+/// The path resolved by the first load(), kept so that reload() does not need
+/// the environment again.
+var config_path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+var config_path: ?[]const u8 = null;
+
 /// Read the gesture config file and apply it to `config`. A missing file
 /// leaves the defaults in place; a malformed line is logged and skipped.
 pub fn load(config: *Config, io: Io, environ: std.process.Environ) void {
-    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const path = configPath(environ, &path_buffer) orelse return;
+    if (config_path == null) {
+        config_path = configPath(environ, &config_path_buffer);
+    }
+    reload(config, io);
+}
+
+/// Re-read the file loaded by load(), e.g. on SIGHUP. Does nothing before the
+/// first load(). The caller must be on the event loop thread, which is the only
+/// thread that reads the config.
+pub fn reload(config: *Config, io: Io) void {
+    const path = config_path orelse return;
 
     var buffer: [64 * 1024]u8 = undefined;
     const contents = Io.Dir.cwd().readFile(io, path, &buffer) catch |err| switch (err) {

@@ -42,6 +42,7 @@ wl_server: *wl.Server,
 
 sigint_source: *wl.EventSource,
 sigterm_source: *wl.EventSource,
+sighup_source: *wl.EventSource,
 
 fixes: *wlr.Fixes,
 
@@ -136,6 +137,7 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
         .wl_server = wl_server,
         .sigint_source = try loop.addSignal(*wl.Server, @intFromEnum(posix.SIG.INT), terminate, wl_server),
         .sigterm_source = try loop.addSignal(*wl.Server, @intFromEnum(posix.SIG.TERM), terminate, wl_server),
+        .sighup_source = try loop.addSignal(*Server, @intFromEnum(posix.SIG.HUP), reloadConfig, server),
 
         .fixes = try wlr.Fixes.create(wl_server, 1),
 
@@ -251,6 +253,7 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
 pub fn deinit(server: *Server) void {
     server.sigint_source.remove();
     server.sigterm_source.remove();
+    server.sighup_source.remove();
 
     server.renderer_lost.link.remove();
     server.new_xdg_toplevel.link.remove();
@@ -402,6 +405,15 @@ fn blocklist(server: *Server, global: *const wl.Global) bool {
 /// Handle SIGINT and SIGTERM by gracefully stopping the server
 fn terminate(_: c_int, wl_server: *wl.Server) c_int {
     wl_server.terminate();
+    return 0;
+}
+
+/// Handle SIGHUP by re-reading the local config file. The handler runs on the
+/// event loop thread, which is also the only thread that reads the config, so a
+/// gesture already in flight keeps the target it was started with.
+fn reloadConfig(_: c_int, server: *Server) c_int {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    GestureConfig.reload(&server.gesture_config, io);
     return 0;
 }
 

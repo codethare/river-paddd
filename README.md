@@ -44,7 +44,7 @@ Four-finger pinch-in/out fire F12/F11.
 
 The mapping defaults to the table above and can be overridden in
 `$XDG_CONFIG_HOME/river/gestures.conf` (or `~/.config/river/gestures.conf`),
-which is read at startup:
+which is read at startup and re-read whenever river receives SIGHUP:
 
 ```
 # gestures.conf
