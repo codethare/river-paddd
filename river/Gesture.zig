@@ -152,7 +152,7 @@ pub const Gestures = struct {
         if (cancelled) return .{};
 
         const fingers_index = GestureConfig.fingerIndex(fingers) orelse return .{};
-        const direction = GestureConfig.resolveDirection(dx, dy, natural_scroll) orelse return .{};
+        const direction = GestureConfig.resolveDirection(dx, dy, natural_scroll, self.config.swipe_threshold) orelse return .{};
         const target = self.config.swipe[fingers_index][@intFromEnum(direction)] orelse return .{};
         return .{ .action = targetAction(target) };
     }
@@ -237,9 +237,9 @@ pub const Gestures = struct {
         if (cancelled) return .{};
 
         // Pinch in or out; sub-threshold pinches are consumed without firing.
-        const direction: GestureConfig.PinchDirection = if (GestureConfig.isPinchIn(scale))
+        const direction: GestureConfig.PinchDirection = if (GestureConfig.isPinchIn(scale, self.config.pinch_threshold))
             .in
-        else if (GestureConfig.isPinchOut(scale))
+        else if (GestureConfig.isPinchOut(scale, self.config.pinch_threshold))
             .out
         else
             return .{};
@@ -416,6 +416,33 @@ test "a swipe or pinch can fire a mouse button" {
     try std.testing.expect(gestures.swipeBegin(device_a, 3).action == .none);
     try std.testing.expect(gestures.swipeUpdate(device_a, 50, 0).action == .none);
     try std.testing.expect(gestures.swipeEnd(device_a, false, false).action == .none);
+}
+
+test "thresholds come from the config" {
+    var config = GestureConfig.default_config;
+    config.swipe_threshold = 100;
+    config.pinch_threshold = 0.5;
+    var gestures = Gestures.init(std.testing.allocator, &config);
+    defer gestures.deinit();
+
+    // A 50 unit swipe is deliberate by default, but not at this threshold.
+    try std.testing.expect(gestures.swipeBegin(device_a, 3).action == .none);
+    try std.testing.expect(gestures.swipeUpdate(device_a, -50, 0).action == .none);
+    try std.testing.expect(gestures.swipeEnd(device_a, false, false).action == .none);
+
+    // Same for a 1.2 scale pinch-out.
+    try std.testing.expect(gestures.pinchBegin(device_a, 4).action == .none);
+    try std.testing.expect(gestures.pinchUpdate(device_a, 1.2).action == .none);
+    try std.testing.expect(gestures.pinchEnd(device_a, false).action == .none);
+
+    // Past the thresholds they fire again, without re-reading the config.
+    try std.testing.expect(gestures.swipeBegin(device_a, 3).action == .none);
+    try std.testing.expect(gestures.swipeUpdate(device_a, -150, 0).action == .none);
+    try expectKey(gestures.swipeEnd(device_a, false, false), .F3);
+
+    try std.testing.expect(gestures.pinchBegin(device_a, 4).action == .none);
+    try std.testing.expect(gestures.pinchUpdate(device_a, 1.6).action == .none);
+    try expectKey(gestures.pinchEnd(device_a, false), .F11);
 }
 
 test "untaken finger counts are forwarded" {

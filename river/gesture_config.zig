@@ -8,6 +8,7 @@
 const GestureConfig = @This();
 
 const std = @import("std");
+const math = std.math;
 const Io = std.Io;
 const xkb = @import("xkbcommon");
 
@@ -40,6 +41,14 @@ pub const Config = struct {
     /// when unbound.
     enabled: bool = true,
 
+    /// Accumulated swipe delta below which (in both axes) fingers are treated
+    /// as resting in place and fire nothing.
+    swipe_threshold: f64 = 10,
+
+    /// Accumulated scale past which a pinch counts as in (1 - threshold) or
+    /// out (1 + threshold).
+    pinch_threshold: f64 = 0.05,
+
     /// Swipe targets, indexed by [finger index][direction].
     swipe: [2][4]?Target = .{
         .{ .{ .key = .F1 }, .{ .key = .F2 }, .{ .key = .F3 }, .{ .key = .F4 } },
@@ -71,13 +80,10 @@ pub fn fingerIndex(fingers: u32) ?usize {
     };
 }
 
-/// Fingers resting in place (accidental touch) fires nothing.
-const min_swipe_delta = 10.0;
-
 /// Resolve the swipe direction from the accumulated physical delta, honoring
 /// the touchpad's natural scroll sense. Returns null when the swipe is too
-/// small to be intentional.
-pub fn resolveDirection(dx: f64, dy: f64, natural_scroll: bool) ?Direction {
+/// small to be intentional, per `threshold`.
+pub fn resolveDirection(dx: f64, dy: f64, natural_scroll: bool, threshold: f64) ?Direction {
     var ddx = dx;
     var ddy = dy;
     if (natural_scroll) {
@@ -85,7 +91,7 @@ pub fn resolveDirection(dx: f64, dy: f64, natural_scroll: bool) ?Direction {
         ddy = -ddy;
     }
 
-    if (@abs(ddx) <= min_swipe_delta and @abs(ddy) <= min_swipe_delta) return null;
+    if (@abs(ddx) <= threshold and @abs(ddy) <= threshold) return null;
 
     return if (@abs(ddx) > @abs(ddy))
         (if (ddx > 0) .right else .left)
@@ -93,17 +99,14 @@ pub fn resolveDirection(dx: f64, dy: f64, natural_scroll: bool) ?Direction {
         (if (ddy > 0) .down else .up);
 }
 
-/// Accumulated gesture scale below/above which a pinch counts as in/out.
-const min_scale_delta = 0.05;
-
 /// True when the accumulated scale is a deliberate pinch-in.
-pub fn isPinchIn(scale: f64) bool {
-    return scale <= 1.0 - min_scale_delta;
+pub fn isPinchIn(scale: f64, threshold: f64) bool {
+    return scale <= 1.0 - threshold;
 }
 
 /// True when the accumulated scale is a deliberate pinch-out.
-pub fn isPinchOut(scale: f64) bool {
-    return scale >= 1.0 + min_scale_delta;
+pub fn isPinchOut(scale: f64, threshold: f64) bool {
+    return scale >= 1.0 + threshold;
 }
 
 pub const ParseError = error{
@@ -112,6 +115,7 @@ pub const ParseError = error{
     UnknownValue,
     InvalidKeysym,
     InvalidButton,
+    InvalidThreshold,
 };
 
 /// Path of the gesture config file, per the XDG base directory specification.
@@ -195,6 +199,16 @@ pub fn parseLine(config: *Config, line: []const u8) ParseError!void {
         return;
     }
 
+    if (std.mem.eql(u8, key, "swipe_threshold")) {
+        config.swipe_threshold = try parseThreshold(value);
+        return;
+    }
+
+    if (std.mem.eql(u8, key, "pinch_threshold")) {
+        config.pinch_threshold = try parseThreshold(value);
+        return;
+    }
+
     // Swipes: 3up, 3down, 3left, 3right, 4up, ...
     if (key.len > 1 and (key[0] == '3' or key[0] == '4')) {
         const direction: Direction = if (std.mem.eql(u8, key[1..], "up"))
@@ -249,6 +263,14 @@ fn parseKeysym(value: []const u8) ParseError!xkb.Keysym {
     const keysym = xkb.Keysym.fromName(name[0..value.len :0], .case_insensitive);
     if (keysym == .NoSymbol) return error.InvalidKeysym;
     return keysym;
+}
+
+/// Parse a positive gesture threshold. Non-finite and non-positive values are
+/// rejected so that a typo cannot silently disable a gesture.
+fn parseThreshold(value: []const u8) ParseError!f64 {
+    const threshold = std.fmt.parseFloat(f64, value) catch return error.InvalidThreshold;
+    if (!math.isFinite(threshold) or threshold <= 0) return error.InvalidThreshold;
+    return threshold;
 }
 
 /// Parse `none`, `button:<evdev code>` or a keysym name.
@@ -329,8 +351,38 @@ test "gesture config rejects malformed lines without changing the defaults" {
     try testing.expectError(error.InvalidKeysym, parseLine(&config, "3up = NotAKeysym"));
     try testing.expectError(error.InvalidButton, parseLine(&config, "hold3 = button:zzz"));
     try testing.expectError(error.InvalidButton, parseLine(&config, "3left = button:zzz"));
+    try testing.expectError(error.InvalidThreshold, parseLine(&config, "swipe_threshold = soon"));
+    try testing.expectError(error.InvalidThreshold, parseLine(&config, "swipe_threshold = -1"));
+    try testing.expectError(error.InvalidThreshold, parseLine(&config, "pinch_threshold = 0"));
 
     try testing.expect(config.enabled);
     try testing.expectEqual(@as(?Target, .{ .key = .F1 }), config.swipe[0][@intFromEnum(Direction.up)]);
     try testing.expectEqual(@as(u32, 0x113), config.hold[0].?.button);
+    try testing.expectEqual(@as(f64, 10), config.swipe_threshold);
+    try testing.expectEqual(@as(f64, 0.05), config.pinch_threshold);
+}
+
+test "gesture config takes custom thresholds" {
+    const testing = std.testing;
+
+    var config = default_config;
+    try parseLine(&config, "swipe_threshold = 25.5");
+    try parseLine(&config, "pinch_threshold = 0.2");
+
+    try testing.expectEqual(@as(f64, 25.5), config.swipe_threshold);
+    try testing.expectEqual(@as(f64, 0.2), config.pinch_threshold);
+
+    // The thresholds are what resolveDirection and the pinch tests use.
+    try testing.expectEqual(
+        @as(?Direction, null),
+        resolveDirection(20, 0, false, config.swipe_threshold),
+    );
+    try testing.expectEqual(
+        @as(?Direction, .right),
+        resolveDirection(30, 0, false, config.swipe_threshold),
+    );
+    try testing.expect(isPinchIn(0.7, config.pinch_threshold));
+    try testing.expect(!isPinchIn(0.9, config.pinch_threshold));
+    try testing.expect(isPinchOut(1.3, config.pinch_threshold));
+    try testing.expect(!isPinchOut(1.1, config.pinch_threshold));
 }
