@@ -39,9 +39,9 @@ scale does not (documenting the bug).
 
 ### G-fix-1 — Let swipes and pinches inject mouse buttons
 
-**Why:** Only holds can inject a mouse button today, so "3-finger swipe = browser back"
-requires a WM binding. A `button:` target lets a gesture reach an *application* directly
-through the existing pointer binding path.
+**Why:** Only holds can press a mouse button binding today, so a swipe or pinch can only drive
+key bindings. A `button:` target lets them fire a pointer binding too (as a click-like tap)
+through the existing injection path.
 
 **Design:** unify `HoldTarget` into `Target = union(enum) { key: xkb.Keysym, button: u32 }`
 used by `swipe`, `hold` and `pinch`; the parser already has the value syntax

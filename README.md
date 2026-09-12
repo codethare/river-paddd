@@ -63,8 +63,9 @@ pinch4out = F11
 Keys are `enabled`, `<3|4><up|down|left|right>`, `hold<3|4>` and
 `pinch<3|4><in|out>`. Any of them takes an xkbcommon keysym name (case
 insensitive), a mouse button as `button:<evdev code>`, or `none` to unmap, so a
-gesture can drive the window manager (keysym) or an application directly (mouse
-button). Malformed lines are logged and skipped, and a missing file leaves the
+gesture can fire either a window manager key binding (keysym) or one of its
+pointer bindings (mouse button). Malformed lines are logged and skipped, and a
+missing file leaves the
 defaults in place. A commented sample listing every key with its default is
 shipped in `doc/gestures.conf`; see
 `river/gesture_config.zig` for the parser and `tasks/plan-gesture-radius.md` for
