@@ -126,9 +126,9 @@ const FrameBuffer = struct {
     }
 
     /// Fill one corner square with the ring's anti-aliased coverage, clipped
-    /// to `clip` (in frame coordinates). `frame` holds the square's texture,
-    /// rasterized at `scale` device pixels per logical pixel, and `origin` is
-    /// the square's position in frame coordinates.
+    /// to `clip` (in frame coordinates). `frame` holds the square's texture and
+    /// `scale` is its own device pixels per logical pixel (see cornerScale);
+    /// `origin` is the square's position in frame coordinates.
     fn fillCorner(
         frame: *FrameBuffer,
         ctx: *const BorderFillContext,
@@ -257,6 +257,15 @@ fn cornerRaster(size: usize, scale: f64) usize {
     const scaled = @ceil(@as(f64, @floatFromInt(size)) * scale);
     if (!(scaled >= 1)) return 1;
     return @intFromFloat(scaled);
+}
+
+/// Device pixels per logical pixel of a corner texture. The texture is drawn in
+/// exactly `size` logical pixels, so this ratio — not the output scale — maps
+/// texel centers to logical coordinates. `cornerRaster` rounds the raster size
+/// up, so the two differ on fractional-scale outputs: using the output scale
+/// there would sample a grid that is too wide for the square.
+fn cornerScale(raster: usize, size: usize) f64 {
+    return @as(f64, @floatFromInt(raster)) / @as(f64, @floatFromInt(size));
 }
 
 /// Coverage of the point (x, y) — a pixel center in frame coordinates —
@@ -1372,12 +1381,15 @@ fn drawBorders(window: *Window) void {
     }
 
     const raster = cornerRaster(geometry.size, scale);
+    // The sampling ratio comes from the texture itself, not from the output
+    // scale: see cornerScale().
+    const sample_scale = cornerScale(raster, geometry.size);
     for (geometry.corners, window.border.corners) |corner, scene_buffer| {
         const frame = FrameBuffer.create(raster, raster) catch {
             std.log.err("out of memory drawing window borders", .{});
             return;
         };
-        frame.fillCorner(&ctx, @floatFromInt(corner.x), @floatFromInt(corner.y), &clip, scale);
+        frame.fillCorner(&ctx, @floatFromInt(corner.x), @floatFromInt(corner.y), &clip, sample_scale);
         scene_buffer.node.setEnabled(true);
         scene_buffer.node.setPosition(corner.x + offset, corner.y + offset);
         scene_buffer.setBuffer(&frame.base);
@@ -1701,6 +1713,28 @@ test "corner textures are rasterized at the output scale" {
     try testing.expectEqual(@as(usize, 15), cornerRaster(10, 1.5));
     try testing.expectEqual(@as(usize, 13), cornerRaster(10, 1.25));
     try testing.expectEqual(@as(usize, 1), cornerRaster(1, 0.5));
+}
+
+test "corner texture grid spans exactly the logical square" {
+    const testing = std.testing;
+    const size = 10;
+    // Rounding the raster up makes the texture's own ratio (13/10 = 1.3) differ
+    // from the output scale (1.25). Sampling with the output scale would cover
+    // 13/1.25 = 10.4 logical pixels, i.e. overshoot the square.
+    const raster = cornerRaster(size, 1.25);
+    try testing.expectEqual(@as(usize, 13), raster);
+    try testing.expect(cornerScale(raster, size) > 1.25);
+
+    // The texel grid spans exactly the square: the ratio times the logical size
+    // is the raster again, and both outer texel centers stay inside it.
+    const scale = cornerScale(raster, size);
+    try testing.expectApproxEqAbs(@as(f64, @floatFromInt(raster)), scale * size, 1e-9);
+    try testing.expect(0.5 / scale > 0);
+    try testing.expect((@as(f64, @floatFromInt(raster)) - 0.5) / scale < size);
+
+    // On an integer scale the two ratios are identical, which is why the
+    // mismatch only shows up on fractional-scale outputs.
+    try testing.expectEqual(@as(f64, 2), cornerScale(cornerRaster(11, 2), 11));
 }
 
 test "border geometry covers exactly the ring" {
