@@ -117,14 +117,22 @@ will be reported as a bug.
 
 **Why:** `border_rendered` includes `content_width`/`content_height`, so an interactive resize
 re-rasterizes and re-uploads all four corner textures every frame. The texture content only
-depends on `(radius, bw, which edges are drawn, color, scale)`: mirroring maps the right and
-bottom corners onto the same `[0, size]` square, so the window size never enters the pattern
-(except through the per-window radius clamp, which must still invalidate).
+depends on `(radius, bw, which edges are drawn, color, scale)`:
 
-**Design:** split the cache: a corner cache keyed on the corner parameters, and per-frame strip
-geometry as today.
+- mirroring maps the right and bottom corners onto the same `[0, size]` square, so the window
+  size never enters the pattern;
+- the clamped radius, the one size-dependent input, is part of the key, so the degenerate
+  case (a window smaller than its radius) still invalidates.
 
-**Check:** count `FrameBuffer.create` calls per frame before and after.
+**Done:** the cache now compares the texture inputs and the frame size separately. On a resize
+the strips and corner nodes are repositioned and no texture is created, filled or uploaded;
+the unchanged fast path (texture and frame both equal) still returns immediately. A
+pixel-exact test rasterizes both corners of a 100x50 and a 400x300 window with the same border
+and requires the buffers to be byte-identical, plus a partially covered texel per corner so
+the comparison cannot pass on two blank squares. Verified by mutation: using the frame height
+instead of the width for the right corners makes it fail.
+
+**Files:** `river/Window.zig`.
 
 ### G-perf-1 — Drag ratio knob
 
@@ -144,21 +152,22 @@ units) can be turned into a value.
 
 **Files:** `river/Seat.zig`, `river/Gesture.zig`, `river/gesture_config.zig`, `README.md`.
 
-### RC-simplify-1 — One corner texture rotated four ways
+### RC-simplify-1 — One corner texture rotated four ways: **dropped**
 
-**Why:** `setTransform` exists (`wlroots-0.20.1/src/types/scene.zig:321`), so one rasterized
-corner could serve all four corners by rotation, cutting the texture count 4x.
-
-**Design:** exact when all four edges are drawn (the common case); asymmetric edge sets need a
-texture per edge pair. Medium complexity: adds a transform-dependent path.
-
-**Files:** `river/Window.zig`.
+**Why it is not worth doing:** the transforms do exist (`setTransform`, and the wayland spec
+says "the flipped values correspond to an initial flip around a vertical axis followed by
+rotation", so `normal`, `flipped`, `180` and `flipped_180` cover the four corners), but it is
+only exact when all four edges are drawn, and mixed edge sets would need a texture per edge
+pair plus a transform-dependent code path. After RC-perf-1 the only textures left to save are
+the ones created per window and per focus or border change: three tiny allocations per window
+lifetime. Zero gain, more branches, so it stays unimplemented.
 
 ## Progress
 
 - Batch A: RC-fix-1 done, G-fix-1 done, G-ux-2a done.
 - Batch B: G-ux-1 done, G-threshold-1 done, RC5-lite done.
-- Batch C: not started, measure first.
+- Batch C: step 0 (cleanup and units) done, G-perf-1 done, RC-perf-1 done; RC-simplify-1 dropped,
+  see below.
 
 ## Order & gates
 
