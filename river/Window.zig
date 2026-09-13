@@ -454,14 +454,14 @@ border: struct {
     corners: [4]*wlr.SceneBuffer,
 },
 
-/// Inputs of the last border corner textures, so drawBorders() can skip the
-/// render and upload work on render sequences where nothing changed.
+/// Inputs of the last border textures, so drawBorders() can skip the render and
+/// upload work on render sequences where nothing changed. `radius` is the
+/// per-window clamped one; the frame size is compared separately, because the
+/// corner patterns do not depend on it.
 border_rendered: struct {
     valid: bool = false,
     scale: f64 = 1,
-    /// Configured radius, which the render below is then clamped for the window
-    /// size: a reload can change it without changing anything else.
-    border_radius: u31 = 0,
+    radius: usize = 0,
     width: u31 = 0,
     r: u32 = 0,
     g: u32 = 0,
@@ -1298,24 +1298,6 @@ fn drawBorders(window: *Window) void {
     // is on, so the arcs stay crisp on HiDPI outputs.
     const scale = windowScale(window);
 
-    // Skip the render and upload when nothing changed since the last render
-    // sequence (this function runs for every window on every sequence).
-    const cached = &window.border_rendered;
-    if (cached.valid and cached.scale == scale and cached.width == border.width and
-        cached.border_radius == server.gesture_config.border_radius and
-        cached.r == border.r and cached.g == border.g and
-        cached.b == border.b and cached.a == border.a and
-        cached.edges == @as(u32, @bitCast(edges)) and
-        cached.content_width == content_width and
-        cached.content_height == content_height and
-        cached.clip.x == requested.clip.x and cached.clip.y == requested.clip.y and
-        cached.clip.width == requested.clip.width and cached.clip.height == requested.clip.height)
-    {
-        // Re-enable in case the nodes were disabled while fullscreen.
-        showBorder(window);
-        return;
-    }
-
     const frame_width = content_width + 2 * border_width;
     const frame_height = content_height + 2 * border_width;
     // wlroots stores buffer sizes as c_int.
@@ -1334,6 +1316,27 @@ fn drawBorders(window: *Window) void {
         @min(@min(frame_width, frame_height), overflowFreeRadius(border_width)),
     );
     const geometry = borderGeometry(content_width, content_height, border_width, radius, edges);
+
+    // Skip the work when nothing changed since the last render sequence (this
+    // function runs for every window on every sequence). The textures and the
+    // frame are compared separately: a corner's pattern only depends on the
+    // corner parameters, not on the window size, so a resize only has to move
+    // the nodes.
+    const cached = &window.border_rendered;
+    const same_texture = cached.valid and cached.scale == scale and
+        cached.radius == radius and cached.width == border.width and
+        cached.r == border.r and cached.g == border.g and
+        cached.b == border.b and cached.a == border.a and
+        cached.edges == @as(u32, @bitCast(edges)) and
+        cached.clip.x == requested.clip.x and cached.clip.y == requested.clip.y and
+        cached.clip.width == requested.clip.width and cached.clip.height == requested.clip.height;
+    const same_frame = cached.content_width == content_width and
+        cached.content_height == content_height;
+    if (same_texture and same_frame) {
+        // Re-enable in case the nodes were disabled while fullscreen.
+        showBorder(window);
+        return;
+    }
 
     // The border color is premultiplied per the protocol.
     const color: [4]u8 = .{
@@ -1385,24 +1388,27 @@ fn drawBorders(window: *Window) void {
     // scale: see cornerScale().
     const sample_scale = cornerScale(raster, geometry.size);
     for (geometry.corners, window.border.corners) |corner, scene_buffer| {
-        const frame = FrameBuffer.create(raster, raster) catch {
-            std.log.err("out of memory drawing window borders", .{});
-            return;
-        };
-        frame.fillCorner(&ctx, @floatFromInt(corner.x), @floatFromInt(corner.y), &clip, sample_scale);
+        // A resize keeps the texture of every corner: only the nodes move.
+        if (!same_texture) {
+            const frame = FrameBuffer.create(raster, raster) catch {
+                std.log.err("out of memory drawing window borders", .{});
+                return;
+            };
+            frame.fillCorner(&ctx, @floatFromInt(corner.x), @floatFromInt(corner.y), &clip, sample_scale);
+            scene_buffer.setBuffer(&frame.base);
+            // The scene buffer holds the one remaining reference to the frame.
+            frame.base.drop();
+        }
         scene_buffer.node.setEnabled(true);
         scene_buffer.node.setPosition(corner.x + offset, corner.y + offset);
-        scene_buffer.setBuffer(&frame.base);
         // Display the device resolution texture at its logical size.
         scene_buffer.setDestSize(@intCast(geometry.size), @intCast(geometry.size));
-        // The scene buffer holds the one remaining reference to the frame.
-        frame.base.drop();
     }
 
     cached.* = .{
         .valid = true,
         .scale = scale,
-        .border_radius = server.gesture_config.border_radius,
+        .radius = radius,
         .width = border.width,
         .r = border.r,
         .g = border.g,
@@ -1663,6 +1669,15 @@ test "border ring corner band spans the content corner" {
     try testing.expectEqual(@as(f64, 0), ringCoverage(&ctx, 20, 20));
 }
 
+fn hasPartialCoverage(frame: *const FrameBuffer, raster: usize) bool {
+    const pixels: [*]const u32 = @ptrCast(@alignCast(frame.pixels.ptr));
+    for (pixels[0 .. raster * raster]) |pixel| {
+        const alpha = pixel >> 24;
+        if (alpha > 0 and alpha < 255) return true;
+    }
+    return false;
+}
+
 fn expectBox(expected: wlr.Box, actual: wlr.Box) !void {
     try std.testing.expectEqual(expected.x, actual.x);
     try std.testing.expectEqual(expected.y, actual.y);
@@ -1736,6 +1751,59 @@ test "corner texture grid spans exactly the logical square" {
     // On an integer scale the two ratios are identical, which is why the
     // mismatch only shows up on fractional-scale outputs.
     try testing.expectEqual(@as(f64, 2), cornerScale(cornerRaster(11, 2), 11));
+}
+
+test "corner textures do not depend on the window size" {
+    const testing = std.testing;
+    const all: river.WindowV1.Edges = .{ .top = true, .bottom = true, .left = true, .right = true };
+    const bw = 3;
+    const radius = 10;
+
+    // The same already-clamped border on two very different windows: a resize
+    // may keep the corner textures only if they come out identical.
+    const small = borderGeometry(100, 50, bw, radius, all);
+    const large = borderGeometry(400, 300, bw, radius, all);
+    try testing.expectEqual(small.size, large.size);
+
+    const small_ctx = BorderFillContext{
+        .fw = 106,
+        .fh = 56,
+        .bw = bw,
+        .radius = radius,
+        .frame_right = 103,
+        .frame_bottom = 53,
+        .edges = all,
+        .color = .{ 200, 100, 50, 255 },
+    };
+    const large_ctx = BorderFillContext{
+        .fw = 406,
+        .fh = 306,
+        .bw = bw,
+        .radius = radius,
+        .frame_right = 403,
+        .frame_bottom = 303,
+        .edges = all,
+        .color = small_ctx.color,
+    };
+    const clip: wlr.Box = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+    const raster = cornerRaster(small.size, 1);
+    const sample_scale = cornerScale(raster, small.size);
+
+    const small_frame = try FrameBuffer.create(raster, raster);
+    defer small_frame.base.drop();
+    const large_frame = try FrameBuffer.create(raster, raster);
+    defer large_frame.base.drop();
+
+    for (small.corners, large.corners) |small_corner, large_corner| {
+        small_frame.fillCorner(&small_ctx, @floatFromInt(small_corner.x), @floatFromInt(small_corner.y), &clip, sample_scale);
+        large_frame.fillCorner(&large_ctx, @floatFromInt(large_corner.x), @floatFromInt(large_corner.y), &clip, sample_scale);
+        try testing.expectEqualSlices(u8, small_frame.pixels, large_frame.pixels);
+        // Every corner carries a real arc: transparent outside it, opaque on the
+        // border and partially covered at its edge, so the comparison above is
+        // not just two blank squares agreeing with each other.
+        try testing.expect(hasPartialCoverage(small_frame, raster));
+        try testing.expect(hasPartialCoverage(large_frame, raster));
+    }
 }
 
 test "border geometry covers exactly the ring" {
