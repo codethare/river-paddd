@@ -49,6 +49,12 @@ pub const Config = struct {
     /// out (1 + threshold).
     pinch_threshold: f64 = 0.05,
 
+    /// Multiplier for the bridged drag (3-finger hold then move). The gesture
+    /// deltas are libinput's 1000 dpi normalized finger travel, so 1.0 keeps the
+    /// historical mapping (1 unit = 1 layout pixel, divided by the output
+    /// scale); lower it for a slower, more controlled drag.
+    drag_sensitivity: f64 = 1,
+
     /// Radius in pixels of the rounded corners drawn on window borders. Clamped
     /// per window so the content's square corners stay inside the arc.
     border_radius: u31 = 10,
@@ -119,7 +125,7 @@ pub const ParseError = error{
     UnknownValue,
     InvalidKeysym,
     InvalidButton,
-    InvalidThreshold,
+    InvalidNumber,
     InvalidRadius,
 };
 
@@ -205,12 +211,17 @@ pub fn parseLine(config: *Config, line: []const u8) ParseError!void {
     }
 
     if (std.mem.eql(u8, key, "swipe_threshold")) {
-        config.swipe_threshold = try parseThreshold(value);
+        config.swipe_threshold = try parsePositive(value);
         return;
     }
 
     if (std.mem.eql(u8, key, "pinch_threshold")) {
-        config.pinch_threshold = try parseThreshold(value);
+        config.pinch_threshold = try parsePositive(value);
+        return;
+    }
+
+    if (std.mem.eql(u8, key, "drag_sensitivity")) {
+        config.drag_sensitivity = try parsePositive(value);
         return;
     }
 
@@ -275,12 +286,12 @@ fn parseKeysym(value: []const u8) ParseError!xkb.Keysym {
     return keysym;
 }
 
-/// Parse a positive gesture threshold. Non-finite and non-positive values are
-/// rejected so that a typo cannot silently disable a gesture.
-fn parseThreshold(value: []const u8) ParseError!f64 {
-    const threshold = std.fmt.parseFloat(f64, value) catch return error.InvalidThreshold;
-    if (!math.isFinite(threshold) or threshold <= 0) return error.InvalidThreshold;
-    return threshold;
+/// Parse a positive number. Non-finite and non-positive values are rejected so
+/// that a typo cannot silently disable a gesture or a drag.
+fn parsePositive(value: []const u8) ParseError!f64 {
+    const number = std.fmt.parseFloat(f64, value) catch return error.InvalidNumber;
+    if (!math.isFinite(number) or number <= 0) return error.InvalidNumber;
+    return number;
 }
 
 /// Parse `none`, `button:<evdev code>` or a keysym name.
@@ -413,15 +424,27 @@ test "gesture config rejects malformed lines without changing the defaults" {
     try testing.expectError(error.InvalidKeysym, parseLine(&config, "3up = NotAKeysym"));
     try testing.expectError(error.InvalidButton, parseLine(&config, "hold3 = button:zzz"));
     try testing.expectError(error.InvalidButton, parseLine(&config, "3left = button:zzz"));
-    try testing.expectError(error.InvalidThreshold, parseLine(&config, "swipe_threshold = soon"));
-    try testing.expectError(error.InvalidThreshold, parseLine(&config, "swipe_threshold = -1"));
-    try testing.expectError(error.InvalidThreshold, parseLine(&config, "pinch_threshold = 0"));
+    try testing.expectError(error.InvalidNumber, parseLine(&config, "swipe_threshold = soon"));
+    try testing.expectError(error.InvalidNumber, parseLine(&config, "swipe_threshold = -1"));
+    try testing.expectError(error.InvalidNumber, parseLine(&config, "pinch_threshold = 0"));
+    try testing.expectError(error.InvalidNumber, parseLine(&config, "drag_sensitivity = 0"));
 
     try testing.expect(config.enabled);
     try testing.expectEqual(@as(?Target, .{ .key = .F1 }), config.swipe[0][@intFromEnum(Direction.up)]);
     try testing.expectEqual(@as(u32, 0x113), config.hold[0].?.button);
     try testing.expectEqual(@as(f64, 10), config.swipe_threshold);
     try testing.expectEqual(@as(f64, 0.05), config.pinch_threshold);
+    try testing.expectEqual(@as(f64, 1), config.drag_sensitivity);
+}
+
+test "gesture config takes a drag sensitivity" {
+    const testing = std.testing;
+
+    var config = default_config;
+    try testing.expectEqual(@as(f64, 1), config.drag_sensitivity);
+
+    try parseLine(&config, "drag_sensitivity = 0.4");
+    try testing.expectEqual(@as(f64, 0.4), config.drag_sensitivity);
 }
 
 test "gesture config takes custom thresholds" {

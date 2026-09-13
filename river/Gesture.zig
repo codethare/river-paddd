@@ -124,9 +124,19 @@ pub const Gestures = struct {
         return .{};
     }
 
-    pub fn swipeUpdate(self: *Gestures, wlr_device: *wlr.InputDevice, dx: f64, dy: f64) Effects {
+    pub fn swipeUpdate(self: *Gestures, wlr_device: *wlr.InputDevice, dx: f64, dy: f64, scale: f64) Effects {
         const state = self.deviceStateFor(wlr_device) orelse return .{ .action = .forward };
-        if (state.hold.bridging) return .{ .action = .{ .drag = .{ .dx = dx, .dy = dy } } };
+        if (state.hold.bridging) {
+            // libinput reports gesture deltas as 1000 dpi normalized finger
+            // travel, so they need the user's sensitivity, and the output scale
+            // to land in layout coordinates. The seat passes the scale of the
+            // output under the cursor (never 0).
+            const factor = self.config.drag_sensitivity / scale;
+            return .{ .action = .{ .drag = .{
+                .dx = dx * factor,
+                .dy = dy * factor,
+            } } };
+        }
         if (state.swipe.fingers != 0) {
             state.swipe.dx += dx;
             state.swipe.dy += dy;
@@ -149,6 +159,11 @@ pub const Gestures = struct {
         state.swipe = .{};
 
         if (fingers == 0) return .{ .action = .forward };
+
+        // Calibration aid for drag_sensitivity: log the finger travel of every
+        // deliberate swipe (1 unit is 1/1000 inch, so 5 cm is about 1970 units).
+        log.debug("swipe: {d} fingers, {d:.0} x {d:.0} units", .{ fingers, dx, dy });
+
         if (cancelled) return .{};
 
         const fingers_index = GestureConfig.fingerIndex(fingers) orelse return .{};
@@ -271,25 +286,25 @@ test "swipe fires the mapped key and ignores noise" {
 
     // A three finger swipe left fires F3.
     try std.testing.expect(gestures.swipeBegin(device_a, 3).action == .none);
-    try std.testing.expect(gestures.swipeUpdate(device_a, -50, 0).action == .none);
+    try std.testing.expect(gestures.swipeUpdate(device_a, -50, 0, 1).action == .none);
     try expectKey(gestures.swipeEnd(device_a, false, false), .F3);
 
     // A four finger swipe down fires F6, natural scroll flips it to F5.
     try std.testing.expect(gestures.swipeBegin(device_a, 4).action == .none);
-    try std.testing.expect(gestures.swipeUpdate(device_a, 0, 50).action == .none);
+    try std.testing.expect(gestures.swipeUpdate(device_a, 0, 50, 1).action == .none);
     try expectKey(gestures.swipeEnd(device_a, false, false), .F6);
     try std.testing.expect(gestures.swipeBegin(device_a, 4).action == .none);
-    try std.testing.expect(gestures.swipeUpdate(device_a, 0, 50).action == .none);
+    try std.testing.expect(gestures.swipeUpdate(device_a, 0, 50, 1).action == .none);
     try expectKey(gestures.swipeEnd(device_a, false, true), .F5);
 
     // Fingers resting in place fire nothing.
     try std.testing.expect(gestures.swipeBegin(device_a, 3).action == .none);
-    try std.testing.expect(gestures.swipeUpdate(device_a, 2, -2).action == .none);
+    try std.testing.expect(gestures.swipeUpdate(device_a, 2, -2, 1).action == .none);
     try std.testing.expect(gestures.swipeEnd(device_a, false, false).action == .none);
 
     // A cancelled swipe fires nothing either.
     try std.testing.expect(gestures.swipeBegin(device_a, 3).action == .none);
-    try std.testing.expect(gestures.swipeUpdate(device_a, -50, 0).action == .none);
+    try std.testing.expect(gestures.swipeUpdate(device_a, -50, 0, 1).action == .none);
     try std.testing.expect(gestures.swipeEnd(device_a, true, false).action == .none);
 }
 
@@ -308,7 +323,7 @@ test "hold presses, bridges, drags and releases" {
     try std.testing.expect(superseded.action == .none);
     try std.testing.expect(gestures.held());
     try std.testing.expect(gestures.swipeBegin(device_a, 3).action == .none);
-    const drag = gestures.swipeUpdate(device_a, 7, -3);
+    const drag = gestures.swipeUpdate(device_a, 7, -3, 1);
     try std.testing.expect(drag.action == .drag);
     try std.testing.expectEqual(@as(f64, 7), drag.action.drag.dx);
     try std.testing.expectEqual(@as(f64, -3), drag.action.drag.dy);
@@ -342,9 +357,9 @@ test "devices keep independent state" {
     try expectButton(gestures.holdBegin(device_a, 3), 0x113);
     try std.testing.expect(!gestures.holdEnd(device_a, true, true).release);
     try std.testing.expect(gestures.swipeBegin(device_b, 3).action == .none);
-    try std.testing.expect(gestures.swipeUpdate(device_b, 20, 0).action == .none);
+    try std.testing.expect(gestures.swipeUpdate(device_b, 20, 0, 1).action == .none);
     // device_b's deltas are not drag deltas for device_a's drag.
-    try std.testing.expect(gestures.swipeUpdate(device_a, 5, 0).action == .drag);
+    try std.testing.expect(gestures.swipeUpdate(device_a, 5, 0, 1).action == .drag);
     try expectKey(gestures.swipeEnd(device_b, false, false), .F4);
     // device_a's bridged drag is still alive.
     try std.testing.expect(gestures.held());
@@ -352,7 +367,7 @@ test "devices keep independent state" {
     // Forgetting a device drops its state and its drag.
     gestures.forget(device_a);
     try std.testing.expect(!gestures.held());
-    try std.testing.expect(gestures.swipeUpdate(device_a, 5, 0).action == .forward);
+    try std.testing.expect(gestures.swipeUpdate(device_a, 5, 0, 1).action == .forward);
 }
 
 test "pinch maps to keys and unmapped pinches are consumed" {
@@ -381,7 +396,7 @@ test "runtime config changes the mapping" {
 
     // The remapped keysym is used instead of the default.
     try std.testing.expect(gestures.swipeBegin(device_a, 3).action == .none);
-    try std.testing.expect(gestures.swipeUpdate(device_a, 0, -50).action == .none);
+    try std.testing.expect(gestures.swipeUpdate(device_a, 0, -50, 1).action == .none);
     try expectKey(gestures.swipeEnd(device_a, false, false), .F13);
 
     // Disabling the feature forwards every gesture again.
@@ -399,7 +414,7 @@ test "a swipe or pinch can fire a mouse button" {
     defer gestures.deinit();
 
     try std.testing.expect(gestures.swipeBegin(device_a, 3).action == .none);
-    try std.testing.expect(gestures.swipeUpdate(device_a, -50, 0).action == .none);
+    try std.testing.expect(gestures.swipeUpdate(device_a, -50, 0, 1).action == .none);
     try expectButton(gestures.swipeEnd(device_a, false, false), 0x113);
 
     try std.testing.expect(gestures.pinchBegin(device_a, 4).action == .none);
@@ -409,12 +424,12 @@ test "a swipe or pinch can fire a mouse button" {
     // Other directions keep their defaults, an explicitly unmapped one is
     // consumed silently.
     try std.testing.expect(gestures.swipeBegin(device_a, 4).action == .none);
-    try std.testing.expect(gestures.swipeUpdate(device_a, 50, 0).action == .none);
+    try std.testing.expect(gestures.swipeUpdate(device_a, 50, 0, 1).action == .none);
     try expectKey(gestures.swipeEnd(device_a, false, false), .F8);
 
     config.swipe[0][@intFromEnum(GestureConfig.Direction.right)] = null;
     try std.testing.expect(gestures.swipeBegin(device_a, 3).action == .none);
-    try std.testing.expect(gestures.swipeUpdate(device_a, 50, 0).action == .none);
+    try std.testing.expect(gestures.swipeUpdate(device_a, 50, 0, 1).action == .none);
     try std.testing.expect(gestures.swipeEnd(device_a, false, false).action == .none);
 }
 
@@ -427,7 +442,7 @@ test "thresholds come from the config" {
 
     // A 50 unit swipe is deliberate by default, but not at this threshold.
     try std.testing.expect(gestures.swipeBegin(device_a, 3).action == .none);
-    try std.testing.expect(gestures.swipeUpdate(device_a, -50, 0).action == .none);
+    try std.testing.expect(gestures.swipeUpdate(device_a, -50, 0, 1).action == .none);
     try std.testing.expect(gestures.swipeEnd(device_a, false, false).action == .none);
 
     // Same for a 1.2 scale pinch-out.
@@ -437,7 +452,7 @@ test "thresholds come from the config" {
 
     // Past the thresholds they fire again, without re-reading the config.
     try std.testing.expect(gestures.swipeBegin(device_a, 3).action == .none);
-    try std.testing.expect(gestures.swipeUpdate(device_a, -150, 0).action == .none);
+    try std.testing.expect(gestures.swipeUpdate(device_a, -150, 0, 1).action == .none);
     try expectKey(gestures.swipeEnd(device_a, false, false), .F3);
 
     try std.testing.expect(gestures.pinchBegin(device_a, 4).action == .none);
@@ -445,12 +460,36 @@ test "thresholds come from the config" {
     try expectKey(gestures.pinchEnd(device_a, false), .F11);
 }
 
+test "the bridged drag applies sensitivity and output scale" {
+    var config = GestureConfig.default_config;
+    config.drag_sensitivity = 0.5;
+    var gestures = Gestures.init(std.testing.allocator, &config);
+    defer gestures.deinit();
+
+    // Hold, then move: the press stays down and the deltas become drag deltas.
+    try expectButton(gestures.holdBegin(device_a, 3), 0x113);
+    try std.testing.expect(gestures.holdEnd(device_a, true, true).action == .none);
+    try std.testing.expect(gestures.swipeBegin(device_a, 3).action == .none);
+
+    // 100 units at sensitivity 0.5 on a 1x output are 50 layout pixels.
+    const drag = gestures.swipeUpdate(device_a, 100, -40, 1);
+    try std.testing.expect(drag.action == .drag);
+    try std.testing.expectEqual(@as(f64, 50), drag.action.drag.dx);
+    try std.testing.expectEqual(@as(f64, -20), drag.action.drag.dy);
+
+    // The same finger travel on a 2x output is half of that again.
+    const scaled = gestures.swipeUpdate(device_a, 100, -40, 2);
+    try std.testing.expect(scaled.action == .drag);
+    try std.testing.expectEqual(@as(f64, 25), scaled.action.drag.dx);
+    try std.testing.expectEqual(@as(f64, -10), scaled.action.drag.dy);
+}
+
 test "untaken finger counts are forwarded" {
     var gestures = Gestures.init(std.testing.allocator, &GestureConfig.default_config);
     defer gestures.deinit();
 
     try std.testing.expect(gestures.swipeBegin(device_a, 2).action == .forward);
-    try std.testing.expect(gestures.swipeUpdate(device_a, 5, 5).action == .forward);
+    try std.testing.expect(gestures.swipeUpdate(device_a, 5, 5, 1).action == .forward);
     try std.testing.expect(gestures.swipeEnd(device_a, false, false).action == .forward);
     try std.testing.expect(gestures.holdBegin(device_a, 5).action == .forward);
     try std.testing.expect(gestures.holdEnd(device_a, false, false).action == .forward);

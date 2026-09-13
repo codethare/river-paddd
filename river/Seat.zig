@@ -480,7 +480,7 @@ fn handleSwipeBegin(seat: *Seat, ev: Event.PointerSwipeBegin) void {
 }
 
 fn handleSwipeUpdate(seat: *Seat, ev: Event.PointerSwipeUpdate) void {
-    const effects = seat.gestures.swipeUpdate(ev.device, ev.dx, ev.dy);
+    const effects = seat.gestures.swipeUpdate(ev.device, ev.dx, ev.dy, outputScaleUnderCursor(seat));
     if (effects.action == .forward) {
         server.input_manager.pointer_gestures.sendSwipeUpdate(seat.wlr_seat, ev.time_msec, ev.dx, ev.dy);
         return;
@@ -614,6 +614,15 @@ fn injectGestureButton(seat: *Seat, button: u32) void {
 fn gestureGroup(seat: *Seat) ?*KeyboardGroup {
     const wlr_keyboard = seat.wlr_seat.getKeyboard() orelse return seat.keyboard_groups.first();
     return @ptrCast(@alignCast(wlr_keyboard.data));
+}
+
+/// Scale of the output under the cursor, used to normalize the bridged drag:
+/// the gesture deltas are libinput's 1000 dpi normalized finger travel, which
+/// has to be divided by the scale to feel the same on every output. 1 when the
+/// cursor is on no output or the output reports no scale.
+fn outputScaleUnderCursor(seat: *Seat) f64 {
+    const wlr_output = server.om.outputAt(seat.cursor.wlr_cursor.x, seat.cursor.wlr_cursor.y) orelse return 1;
+    return if (wlr_output.scale > 0) wlr_output.scale else 1;
 }
 
 /// Natural scroll setting of the device that generated the swipe. The device

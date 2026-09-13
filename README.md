@@ -42,6 +42,13 @@ window manager (or riverctl binding) can bind them like ordinary keysyms. Holds
 are sustained presses: 3 fingers press `BTN_SIDE` (0x113), 4 fingers press F10.
 Four-finger pinch-in/out fire F12/F11.
 
+Holding three fingers and then moving them drags the window under the cursor.
+The gesture deltas are libinput's 1000 dpi normalized finger travel, so they are
+scaled by `drag_sensitivity` (default 1.0, the historical mapping) and divided by
+the scale of the output under the cursor, which makes a 1x and a 2x output feel
+alike. `--log-level=debug` logs the units a swipe accumulated, e.g. about 1970
+for 5 cm of finger travel, which is what the knob is calibrated against.
+
 The mapping defaults to the table above and can be overridden in
 `$XDG_CONFIG_HOME/river/gestures.conf` (or `~/.config/river/gestures.conf`),
 which is read at startup and re-read whenever river receives SIGHUP:
@@ -60,7 +67,7 @@ pinch4in = F12
 pinch4out = F11
 ```
 
-Keys are `enabled`, `swipe_threshold`, `pinch_threshold`,
+Keys are `enabled`, `swipe_threshold`, `pinch_threshold`, `drag_sensitivity`,
 `<3|4><up|down|left|right>`, `hold<3|4>` and `pinch<3|4><in|out>`. Any binding
 takes an xkbcommon keysym name (case insensitive), a mouse button as
 `button:<evdev code>`, or `none` to unmap, so a gesture can fire either a window
