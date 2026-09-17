@@ -10,6 +10,8 @@ body:
     attributes:
       label: Use Case Description
       description: |
+        Note: Use of generative AI/LLMs is strictly forbidden on the river issue tracker.
+
         Please describe your use case in detail.
 
         Do you have a suggestion for how river could support it?

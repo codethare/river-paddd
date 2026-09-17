@@ -22,7 +22,6 @@ const LockSurface = @import("LockSurface.zig");
 const Output = @import("Output.zig");
 const PointerBinding = @import("PointerBinding.zig");
 const PointerConstraint = @import("PointerConstraint.zig");
-const Scene = @import("Scene.zig");
 const Seat = @import("Seat.zig");
 const Tablet = @import("Tablet.zig");
 const TabletTool = @import("TabletTool.zig");
@@ -69,11 +68,6 @@ const Image = union(enum) {
     },
 };
 
-const LayoutPoint = struct {
-    lx: f64,
-    ly: f64,
-};
-
 /// Current cursor mode as well as any state needed to implement that mode
 mode: Mode = .passthrough,
 
@@ -97,10 +91,6 @@ pressed: std.AutoHashMapUnmanaged(u32, ?*PointerBinding) = .{},
 /// has been moved inside the constraint region.
 constraint: ?*PointerConstraint = null,
 
-/// Keeps track of the last known location of all touch points in layout coordinates.
-/// This information is necessary for proper touch dnd support if there are multiple touch points.
-touch_points: std.AutoHashMapUnmanaged(i32, LayoutPoint) = .{},
-
 request_set_cursor: wl.Listener(*wlr.Seat.event.RequestSetCursor) = .init(handleRequestSetCursor),
 
 motion_relative: wl.Listener(*wlr.Pointer.event.Motion) = .init(queueMotionRelative),
@@ -120,11 +110,11 @@ pinch_end: wl.Listener(*wlr.Pointer.event.PinchEnd) = .init(queuePinchEnd),
 hold_begin: wl.Listener(*wlr.Pointer.event.HoldBegin) = .init(queueHoldBegin),
 hold_end: wl.Listener(*wlr.Pointer.event.HoldEnd) = .init(queueHoldEnd),
 
-touch_down: wl.Listener(*wlr.Touch.event.Down) = .init(handleTouchDown),
-touch_motion: wl.Listener(*wlr.Touch.event.Motion) = .init(handleTouchMotion),
-touch_up: wl.Listener(*wlr.Touch.event.Up) = .init(handleTouchUp),
-touch_cancel: wl.Listener(*wlr.Touch.event.Cancel) = .init(handleTouchCancel),
-touch_frame: wl.Listener(void) = .init(handleTouchFrame),
+touch_down: wl.Listener(*wlr.Touch.event.Down) = .init(queueTouchDown),
+touch_motion: wl.Listener(*wlr.Touch.event.Motion) = .init(queueTouchMotion),
+touch_up: wl.Listener(*wlr.Touch.event.Up) = .init(queueTouchUp),
+touch_cancel: wl.Listener(*wlr.Touch.event.Cancel) = .init(queueTouchCancel),
+touch_frame: wl.Listener(void) = .init(queueTouchFrame),
 
 tablet_tool_axis: wl.Listener(*wlr.Tablet.event.Axis) = .init(handleTabletToolAxis),
 tablet_tool_proximity: wl.Listener(*wlr.Tablet.event.Proximity) = .init(handleTabletToolProximity),
@@ -210,7 +200,6 @@ pub fn deinit(cursor: *Cursor) void {
     cursor.xcursor_manager.destroy();
     cursor.wlr_cursor.destroy();
     cursor.pressed.deinit(util.gpa);
-    cursor.touch_points.deinit(util.gpa);
 }
 
 /// Set the cursor theme for the given seat, as well as the xwayland theme if
@@ -250,6 +239,9 @@ pub fn setTheme(cursor: *Cursor, theme: ?[*:0]const u8, _size: ?u32) !void {
 }
 
 pub fn setImage(cursor: *Cursor, image: Image) void {
+    if (!cursor.seat.wlr_seat.capabilities.pointer) {
+        return;
+    }
     if (cursor.image == .client) {
         cursor.image_surface_destroy.link.remove();
     }
@@ -346,6 +338,9 @@ pub fn opStartPointer(cursor: *Cursor) void {
 }
 
 pub fn opEndPointer(cursor: *Cursor) void {
+    if (cursor.seat.op == null) return;
+    log.debug("end seat op pointer", .{});
+    cursor.seat.op = null;
     if (cursor.pressed.count() == 0) {
         log.debug("entering cursor mode passthrough", .{});
         cursor.mode = .passthrough;
@@ -398,15 +393,13 @@ pub fn processMotionRelative(cursor: *Cursor, event: *const Seat.Event.PointerMo
                 else => unreachable,
             }
 
-            cursor.updateDragIcons();
+            cursor.seat.updateDragIcons();
 
             if (cursor.constraint) |constraint| {
                 constraint.maybeActivate();
             }
         },
-        .op => {
-            cursor.seat.opUpdate(@intFromFloat(cursor.wlr_cursor.x), @intFromFloat(cursor.wlr_cursor.y));
-        },
+        .op => server.wm.dirtyWindowingLazy(),
     }
 }
 
@@ -458,12 +451,7 @@ fn updateHovered(cursor: *Cursor) void {
 }
 
 pub fn processMotionAbsolute(cursor: *Cursor, event: *const Seat.Event.PointerMotionAbsolute) void {
-    var mapping = event.mapping;
-    if (mapping.empty()) {
-        server.om.output_layout.getBox(null, &mapping);
-    }
-    const lx = @as(f64, @floatFromInt(mapping.x)) + @as(f64, @floatFromInt(mapping.width)) * event.x;
-    const ly = @as(f64, @floatFromInt(mapping.y)) + @as(f64, @floatFromInt(mapping.height)) * event.y;
+    const lx, const ly = util.absoluteToLayout(event.mapping, event.x, event.y);
     const dx = lx - cursor.wlr_cursor.x;
     const dy = ly - cursor.wlr_cursor.y;
     cursor.processMotionRelative(&.{
@@ -508,7 +496,7 @@ pub fn processButton(cursor: *Cursor, event: *const Seat.Event.PointerButton) vo
         switch (cursor.mode) {
             .passthrough => {
                 if (server.scene.at(cursor.wlr_cursor.x, cursor.wlr_cursor.y)) |at| {
-                    cursor.interact(at);
+                    cursor.seat.interact(at);
 
                     if (at.surface != null) {
                         _ = cursor.seat.wlr_seat.pointerNotifyButton(event.time_msec, event.button, event.state);
@@ -532,7 +520,7 @@ pub fn processButton(cursor: *Cursor, event: *const Seat.Event.PointerButton) vo
             },
             .drag => {
                 if (server.scene.at(cursor.wlr_cursor.x, cursor.wlr_cursor.y)) |at| {
-                    cursor.interact(at);
+                    cursor.seat.interact(at);
                     if (at.surface != null) {
                         _ = cursor.seat.wlr_seat.pointerNotifyButton(event.time_msec, event.button, event.state);
                         return;
@@ -590,128 +578,6 @@ pub fn processAxis(cursor: *Cursor, event: *const Seat.Event.PointerAxis) void {
         event.source,
         event.relative_direction,
     );
-}
-
-fn interact(cursor: Cursor, result: Scene.AtResult) void {
-    switch (result.data) {
-        .window => |window| {
-            cursor.seat.wm_scheduled.interaction = .{ .window = window.ref };
-            server.wm.dirtyWindowing();
-        },
-        .shell_surface => |shell_surface| {
-            cursor.seat.wm_scheduled.interaction = .{ .shell_surface = shell_surface };
-            server.wm.dirtyWindowing();
-        },
-        .lock_surface => |lock_surface| {
-            assert(server.lock_manager.state != .unlocked);
-            cursor.seat.focus(.{ .lock_surface = lock_surface });
-        },
-        .layer_surface => |layer_surface| {
-            switch (cursor.seat.layer_shell.scheduled.focus) {
-                .none, .non_exclusive => {
-                    if (layer_surface.wlr_layer_surface.current.keyboard_interactive == .on_demand) {
-                        cursor.seat.layer_shell.scheduled.focus = .{
-                            .non_exclusive = layer_surface.ref,
-                        };
-                        server.wm.dirtyWindowing();
-                    }
-                },
-                .exclusive => {},
-            }
-        },
-        .override_redirect => |override_redirect| {
-            assert(server.lock_manager.state != .locked);
-            override_redirect.focusIfDesired();
-        },
-    }
-}
-
-fn handleTouchDown(
-    listener: *wl.Listener(*wlr.Touch.event.Down),
-    event: *wlr.Touch.event.Down,
-) void {
-    const cursor: *Cursor = @fieldParentPtr("touch_down", listener);
-
-    cursor.seat.handleActivity();
-
-    var lx: f64 = undefined;
-    var ly: f64 = undefined;
-    cursor.wlr_cursor.absoluteToLayoutCoords(event.device, event.x, event.y, &lx, &ly);
-
-    cursor.touch_points.putNoClobber(util.gpa, event.touch_id, .{ .lx = lx, .ly = ly }) catch {
-        log.err("out of memory", .{});
-        return;
-    };
-
-    if (server.scene.at(lx, ly)) |result| {
-        cursor.interact(result);
-
-        if (result.surface) |surface| {
-            _ = cursor.seat.wlr_seat.touchNotifyDown(
-                surface,
-                event.time_msec,
-                event.touch_id,
-                result.sx,
-                result.sy,
-            );
-        }
-    }
-}
-
-fn handleTouchMotion(
-    listener: *wl.Listener(*wlr.Touch.event.Motion),
-    event: *wlr.Touch.event.Motion,
-) void {
-    const cursor: *Cursor = @fieldParentPtr("touch_motion", listener);
-
-    cursor.seat.handleActivity();
-
-    if (cursor.touch_points.getPtr(event.touch_id)) |point| {
-        cursor.wlr_cursor.absoluteToLayoutCoords(event.device, event.x, event.y, &point.lx, &point.ly);
-
-        cursor.updateDragIcons();
-
-        if (server.scene.at(point.lx, point.ly)) |result| {
-            cursor.seat.wlr_seat.touchNotifyMotion(event.time_msec, event.touch_id, result.sx, result.sy);
-        }
-    }
-}
-
-fn handleTouchUp(
-    listener: *wl.Listener(*wlr.Touch.event.Up),
-    event: *wlr.Touch.event.Up,
-) void {
-    const cursor: *Cursor = @fieldParentPtr("touch_up", listener);
-
-    cursor.seat.handleActivity();
-
-    if (cursor.touch_points.remove(event.touch_id)) {
-        _ = cursor.seat.wlr_seat.touchNotifyUp(event.time_msec, event.touch_id);
-    }
-}
-
-fn handleTouchCancel(
-    listener: *wl.Listener(*wlr.Touch.event.Cancel),
-    _: *wlr.Touch.event.Cancel,
-) void {
-    const cursor: *Cursor = @fieldParentPtr("touch_cancel", listener);
-
-    cursor.seat.handleActivity();
-
-    cursor.touch_points.clearRetainingCapacity();
-
-    const wlr_seat = cursor.seat.wlr_seat;
-    while (wlr_seat.touch_state.touch_points.first()) |touch_point| {
-        wlr_seat.touchNotifyCancel(touch_point.client);
-    }
-}
-
-fn handleTouchFrame(listener: *wl.Listener(void)) void {
-    const cursor: *Cursor = @fieldParentPtr("touch_frame", listener);
-
-    cursor.seat.handleActivity();
-
-    cursor.seat.wlr_seat.touchNotifyFrame();
 }
 
 fn handleTabletToolAxis(
@@ -803,17 +669,6 @@ fn passthrough(cursor: *Cursor, time: u32) void {
     }
 
     cursor.clearFocus();
-}
-
-fn updateDragIcons(cursor: *Cursor) void {
-    var it = server.scene.drag_icons.children.iterator(.forward);
-    while (it.next()) |node| {
-        const icon = @as(*DragIcon, @ptrCast(@alignCast(node.data)));
-
-        if (icon.wlr_drag_icon.drag.seat == cursor.seat.wlr_seat) {
-            icon.updatePosition(cursor);
-        }
-    }
 }
 
 fn queueMotionRelative(listener: *wl.Listener(*wlr.Pointer.event.Motion), event: *wlr.Pointer.event.Motion) void {
@@ -943,4 +798,62 @@ fn queueHoldEnd(listener: *wl.Listener(*wlr.Pointer.event.HoldEnd), event: *wlr.
         .time_msec = event.time_msec,
         .cancelled = event.cancelled,
     } }) catch {};
+}
+
+fn queueTouchDown(
+    listener: *wl.Listener(*wlr.Touch.event.Down),
+    event: *wlr.Touch.event.Down,
+) void {
+    const cursor: *Cursor = @fieldParentPtr("touch_down", listener);
+    const device: *InputDevice = @ptrCast(@alignCast(event.device.data));
+    cursor.seat.queueEvent(.{ .touch_down = .{
+        .mapping = device.activeMapping(),
+        .time_msec = event.time_msec,
+        .touch_id = event.touch_id,
+        .x = event.x,
+        .y = event.y,
+    } }) catch {};
+}
+
+fn queueTouchMotion(
+    listener: *wl.Listener(*wlr.Touch.event.Motion),
+    event: *wlr.Touch.event.Motion,
+) void {
+    const cursor: *Cursor = @fieldParentPtr("touch_motion", listener);
+    const device: *InputDevice = @ptrCast(@alignCast(event.device.data));
+    cursor.seat.queueEvent(.{ .touch_motion = .{
+        .mapping = device.activeMapping(),
+        .time_msec = event.time_msec,
+        .touch_id = event.touch_id,
+        .x = event.x,
+        .y = event.y,
+    } }) catch {};
+}
+
+fn queueTouchUp(
+    listener: *wl.Listener(*wlr.Touch.event.Up),
+    event: *wlr.Touch.event.Up,
+) void {
+    const cursor: *Cursor = @fieldParentPtr("touch_up", listener);
+    cursor.seat.queueEvent(.{ .touch_up = .{
+        .time_msec = event.time_msec,
+        .touch_id = event.touch_id,
+    } }) catch {};
+}
+
+fn queueTouchCancel(
+    listener: *wl.Listener(*wlr.Touch.event.Cancel),
+    _: *wlr.Touch.event.Cancel,
+) void {
+    const cursor: *Cursor = @fieldParentPtr("touch_cancel", listener);
+    // It seems that all(?) other compositors treat libinput cancel events as applying
+    // to all touch points despite the fact that libinput specifies a specific touch
+    // point. This behavior seems to work with how libinput/the kernel/hardware emits
+    // cancel events, so make the same choice here.
+    cursor.seat.queueEvent(.touch_cancel) catch {};
+}
+
+fn queueTouchFrame(listener: *wl.Listener(void)) void {
+    const cursor: *Cursor = @fieldParentPtr("touch_frame", listener);
+    cursor.seat.queueEvent(.touch_frame) catch {};
 }

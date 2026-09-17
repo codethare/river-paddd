@@ -18,6 +18,8 @@ const util = @import("util.zig");
 const IdleInhibitManager = @import("IdleInhibitManager.zig");
 const GestureConfig = @import("gesture_config.zig");
 const InputManager = @import("InputManager.zig");
+const LayerShell = @import("LayerShell.zig");
+const LibinputConfig = @import("LibinputConfig.zig");
 const LockManager = @import("LockManager.zig");
 const Output = @import("Output.zig");
 const OutputManager = @import("OutputManager.zig");
@@ -25,14 +27,13 @@ const Scene = @import("Scene.zig");
 const SceneNodeData = @import("SceneNodeData.zig");
 const Seat = @import("Seat.zig");
 const TabletTool = @import("TabletTool.zig");
+const TouchGestures = @import("TouchGestures.zig");
 const Window = @import("Window.zig");
 const WindowManager = @import("WindowManager.zig");
-const XkbBindings = @import("XkbBindings.zig");
-const LayerShell = @import("LayerShell.zig");
-const LibinputConfig = @import("LibinputConfig.zig");
-const XkbConfig = @import("XkbConfig.zig");
 const XdgDecoration = @import("XdgDecoration.zig");
 const XdgToplevel = @import("XdgToplevel.zig");
+const XkbBindings = @import("XkbBindings.zig");
+const XkbConfig = @import("XkbConfig.zig");
 const XwaylandOverrideRedirect = @import("XwaylandOverrideRedirect.zig");
 const XwaylandWindow = @import("XwaylandWindow.zig");
 
@@ -103,6 +104,7 @@ idle_inhibit_manager: IdleInhibitManager,
 lock_manager: LockManager,
 wm: WindowManager,
 xkb_bindings: XkbBindings,
+touch_gestures: TouchGestures,
 layer_shell: LayerShell,
 
 xwayland: if (build_options.xwayland) ?*wlr.Xwayland else void = if (build_options.xwayland) null,
@@ -192,6 +194,7 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
         .lock_manager = undefined,
         .wm = undefined,
         .xkb_bindings = undefined,
+        .touch_gestures = undefined,
         .layer_shell = undefined,
     };
 
@@ -229,6 +232,7 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
 
     try server.wm.init();
     try server.xkb_bindings.init();
+    try server.touch_gestures.init();
     try server.layer_shell.init();
     try server.scene.init();
     try server.om.init();
@@ -380,6 +384,7 @@ fn blocklist(server: *Server, global: *const wl.Global) bool {
         global == server.layer_shell.global or
         global == server.layer_shell.wlr_shell.global or
         global == server.xkb_bindings.global or
+        global == server.touch_gestures.global or
         global == server.screencopy_manager.global or
         global == server.image_copy_capture_manager.global or
         global == server.output_image_capture_source_manager.global or

@@ -34,8 +34,11 @@ const LockSurface = @import("LockSurface.zig");
 const Output = @import("Output.zig");
 const PointerBinding = @import("PointerBinding.zig");
 const PointerConstraint = @import("PointerConstraint.zig");
+const Scene = @import("Scene.zig");
 const ShellSurface = @import("ShellSurface.zig");
 const Tablet = @import("Tablet.zig");
+const TouchGesture = @import("TouchGesture.zig");
+const TouchGesturesSeat = @import("TouchGesturesSeat.zig");
 const Window = @import("Window.zig");
 const XkbBinding = @import("XkbBinding.zig");
 const XkbBindingsSeat = @import("XkbBindingsSeat.zig");
@@ -68,7 +71,7 @@ pub const Event = union(enum) {
     pointer_motion_absolute: PointerMotionAbsolute,
     pointer_button: PointerButton,
     pointer_axis: PointerAxis,
-    pointer_frame: void,
+    pointer_frame,
 
     pointer_swipe_begin: PointerSwipeBegin,
     pointer_swipe_update: PointerSwipeUpdate,
@@ -80,6 +83,12 @@ pub const Event = union(enum) {
 
     pointer_hold_begin: PointerHoldBegin,
     pointer_hold_end: PointerHoldEnd,
+
+    touch_down: TouchDown,
+    touch_motion: TouchMotion,
+    touch_up: TouchUp,
+    touch_cancel,
+    touch_frame,
 
     pub const PointerMotionRelative = struct {
         mapping: wlr.Box,
@@ -156,6 +165,25 @@ pub const Event = union(enum) {
         time_msec: u32,
         cancelled: bool,
     };
+
+    pub const TouchDown = struct {
+        mapping: wlr.Box,
+        time_msec: u32,
+        touch_id: i32,
+        x: f64,
+        y: f64,
+    };
+    pub const TouchMotion = struct {
+        mapping: wlr.Box,
+        time_msec: u32,
+        touch_id: i32,
+        x: f64,
+        y: f64,
+    };
+    pub const TouchUp = struct {
+        time_msec: u32,
+        touch_id: i32,
+    };
 };
 
 pub const Focus = union(enum) {
@@ -178,6 +206,38 @@ pub const Focus = union(enum) {
     }
 };
 
+const TouchPoint = struct {
+    lx: f64,
+    ly: f64,
+    /// Coordinates of the initial touch down event for this point.
+    lx_down: f64,
+    ly_down: f64,
+    /// Values sent with the wl_touch.down event, if wl_touch.down was sent.
+    sent_down: ?struct {
+        serial: u32,
+        sx: f64,
+        sy: f64,
+    },
+    /// Millisecond timestamp of backend down event.
+    msec_down: u32,
+    /// Millisecond timestamp of last backend motion event.
+    msec_motion: u32,
+};
+
+const TouchOp = struct {
+    scheduled: enum {
+        none,
+        release,
+        cancel,
+    } = .none,
+    requested: enum {
+        none,
+        start,
+    },
+};
+
+const touch_points_max = 10;
+
 wlr_seat: *wlr.Seat,
 
 link: wl.list.Link,
@@ -187,6 +247,7 @@ destroying: bool = false,
 object: ?*river.SeatV1 = null,
 layer_shell: LayerShellSeat = .{},
 xkb_bindings_seat: XkbBindingsSeat = .{},
+touch_gestures: TouchGesturesSeat,
 
 event_queue: std.Deque(Event),
 
@@ -244,16 +305,12 @@ pointer_bindings: wl.list.Head(PointerBinding, .link),
 /// Multiple physical mice are handled by the same Cursor
 cursor: Cursor,
 
+/// Pointer operation
 op: ?struct {
     sent_release: bool = false,
-    input: enum {
-        pointer,
-    },
-    /// Coordinates of the cursor/touch point/etc. at the start of the operation.
+    /// Coordinates of the pointer cursor at the start of the operation.
     start_x: i32,
     start_y: i32,
-    x: i32,
-    y: i32,
 } = null,
 
 relay: InputRelay,
@@ -261,6 +318,24 @@ relay: InputRelay,
 keyboard_groups: wl.list.Head(KeyboardGroup, .link),
 
 focused: Focus = .none,
+
+/// Input routing state
+touch_state: enum {
+    /// Initial state, no touch points
+    init,
+    /// Arbitration in progress, timeout started
+    arbitration,
+    /// Touch input routed to client surfaces
+    passthrough,
+    /// Touch input eaten due to an active gesture
+    eat,
+} = .init,
+/// Touch points are stored in the order the down event was received from the backend.
+/// Fixed capacity of touch_points_max
+touch_points: std.array_hash_map.Auto(i32, TouchPoint) = .empty,
+/// Fixed capacity of touch_points_max
+touch_ops: std.array_hash_map.Auto(i32, TouchOp) = .empty,
+touch_arbitration_timer: *wl.EventSource,
 
 /// The currently in progress drag operation type.
 drag: enum {
@@ -285,19 +360,27 @@ pub fn create(name: [*:0]const u8, transient: ?*ext.TransientSeatV1) !void {
     var event_queue: std.Deque(Event) = try .initCapacity(util.gpa, 1024);
     errdefer event_queue.deinit(util.gpa);
 
+    const event_loop = server.wl_server.getEventLoop();
+    const touch_arbitration_timer = try event_loop.addTimer(*Seat, touchArbitrationTimeout, seat);
+    errdefer touch_arbitration_timer.remove();
+
     seat.* = .{
         .wlr_seat = try wlr.Seat.create(server.wl_server, name),
         .event_queue = event_queue,
+        .touch_arbitration_timer = touch_arbitration_timer,
         .link = undefined,
         .link_sent = undefined,
         .xkb_bindings = undefined,
         .pointer_bindings = undefined,
         .gestures = Gesture.Gestures.init(util.gpa, &server.gesture_config),
+        .touch_gestures = undefined,
         .cursor = undefined,
         .relay = undefined,
         .keyboard_groups = undefined,
         .transient = transient,
     };
+    errdefer seat.wlr_seat.destroy();
+
     seat.wlr_seat.data = seat;
 
     server.input_manager.seats.append(seat);
@@ -306,8 +389,17 @@ pub fn create(name: [*:0]const u8, transient: ?*ext.TransientSeatV1) !void {
 
     seat.xkb_bindings.init();
     seat.pointer_bindings.init();
+    seat.touch_gestures.init();
+
+    try seat.touch_points.ensureTotalCapacity(util.gpa, touch_points_max);
+    errdefer seat.touch_points.deinit(util.gpa);
+
+    try seat.touch_ops.ensureTotalCapacity(util.gpa, touch_points_max);
+    errdefer seat.touch_ops.deinit(util.gpa);
 
     try seat.cursor.init(seat);
+    errdefer comptime unreachable;
+
     seat.relay.init();
 
     seat.keyboard_groups.init();
@@ -344,6 +436,11 @@ pub fn destroy(seat: *Seat) void {
             .pointer_pinch_end,
             .pointer_hold_begin,
             .pointer_hold_end,
+            .touch_down,
+            .touch_motion,
+            .touch_up,
+            .touch_cancel,
+            .touch_frame,
             => {},
         }
     }
@@ -367,6 +464,9 @@ pub fn destroy(seat: *Seat) void {
 
     seat.event_queue.deinit(util.gpa);
     seat.gestures.deinit();
+    seat.touch_points.deinit(util.gpa);
+    seat.touch_ops.deinit(util.gpa);
+    seat.touch_arbitration_timer.remove();
     seat.cursor.deinit();
 
     seat.request_set_selection.link.remove();
@@ -432,6 +532,12 @@ pub fn processEvents(seat: *Seat) void {
 
             .pointer_hold_begin => |ev| seat.handleHoldBegin(ev),
             .pointer_hold_end => |ev| seat.handleHoldEnd(ev),
+
+            .touch_down => |ev| seat.processTouchDown(&ev),
+            .touch_motion => |ev| seat.processTouchMotion(&ev),
+            .touch_up => |ev| seat.processTouchUp(&ev),
+            .touch_cancel => seat.processTouchCancel(),
+            .touch_frame => seat.wlr_seat.touchNotifyFrame(),
         }
     }
     assert(server.wm.state == .idle);
@@ -460,11 +566,63 @@ fn applyGesture(seat: *Seat, effects: Gesture.Effects) void {
             // stays on the window being dragged.
             const mapping: wlr.Box = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
             seat.cursor.move(&mapping, delta.dx, delta.dy);
-            if (seat.op != null) {
-                seat.opUpdate(
-                    @intFromFloat(seat.cursor.wlr_cursor.x),
-                    @intFromFloat(seat.cursor.wlr_cursor.y),
-                );
+            // The wm derives the op delta from the cursor position at manage time.
+            if (seat.op != null) server.wm.dirtyWindowingLazy();
+        },
+    }
+}
+
+pub fn processTouchDown(seat: *Seat, event: *const Seat.Event.TouchDown) void {
+    const lx, const ly = util.absoluteToLayout(event.mapping, event.x, event.y);
+
+    if (seat.touch_points.count() >= touch_points_max) {
+        log.err("maximum {d} touch points supported", .{touch_points_max});
+        return;
+    }
+
+    const gop = seat.touch_points.getOrPutAssumeCapacity(event.touch_id);
+    assert(!gop.found_existing);
+    const touch_point = gop.value_ptr;
+    touch_point.* = .{
+        .lx = lx,
+        .ly = ly,
+        .lx_down = lx,
+        .ly_down = ly,
+        .sent_down = null,
+        .msec_down = event.time_msec,
+        .msec_motion = event.time_msec,
+    };
+
+    state: switch (seat.touch_state) {
+        .init => {
+            const timeout = seat.touch_gestures.requested.arbitration_timeout;
+            if (seat.touch_gestures.gestures.empty() or timeout == 0) {
+                if (seat.touch_gestures.activate(&event.mapping)) {
+                    seat.touch_state = .eat;
+                    continue :state seat.touch_state;
+                } else {
+                    seat.touch_state = .passthrough;
+                    continue :state seat.touch_state;
+                }
+            }
+            log.debug("touch arbitration starting, timeout={d}", .{timeout});
+            seat.touch_arbitration_timer.timerUpdate(math.lossyCast(c_int, timeout)) catch {
+                log.err("failed to set touch arbitration timer", .{});
+            };
+            seat.touch_state = .arbitration;
+            continue :state seat.touch_state;
+        },
+        .arbitration => {
+            if (seat.touch_gestures.activate(&event.mapping)) {
+                seat.touchEat();
+            }
+        },
+        .passthrough => {
+            seat.touchPointSendDown(event.touch_id, touch_point);
+        },
+        .eat => {
+            if (seat.touch_gestures.active != null) {
+                server.wm.dirtyWindowing();
             }
         },
     }
@@ -566,6 +724,140 @@ fn releaseGesture(seat: *Seat) void {
     }
 }
 
+pub fn processTouchMotion(seat: *Seat, event: *const Seat.Event.TouchMotion) void {
+    if (seat.touch_points.getPtr(event.touch_id)) |touch_point| {
+        touch_point.lx, touch_point.ly = util.absoluteToLayout(event.mapping, event.x, event.y);
+        touch_point.msec_motion = event.time_msec;
+
+        switch (seat.touch_state) {
+            .init => unreachable,
+            .arbitration => {
+                if (seat.touch_gestures.activate(&event.mapping)) {
+                    seat.touchEat();
+                }
+            },
+            .passthrough => {
+                if (seat.touch_ops.contains(event.touch_id)) {
+                    server.wm.dirtyWindowingLazy();
+                } else {
+                    if (touch_point.sent_down) |down| {
+                        const sx = down.sx + (touch_point.lx - touch_point.lx_down);
+                        const sy = down.sy + (touch_point.ly - touch_point.ly_down);
+                        seat.wlr_seat.touchNotifyMotion(touch_point.msec_motion, event.touch_id, sx, sy);
+                    }
+                }
+            },
+            .eat => {
+                if (seat.touch_gestures.active != null) {
+                    server.wm.dirtyWindowingLazy();
+                }
+            },
+        }
+
+        seat.updateDragIcons();
+    }
+}
+
+pub fn processTouchUp(seat: *Seat, event: *const Seat.Event.TouchUp) void {
+    if (!seat.touch_points.contains(event.touch_id)) return;
+
+    log.debug("touch up, state: {s}, touch_points: {d}, gesture: {s}", .{
+        @tagName(seat.touch_state),
+        seat.touch_points.count(),
+        if (seat.touch_gestures.active != null) "active" else "null",
+    });
+
+    state: switch (seat.touch_state) {
+        .init => unreachable,
+        .arbitration => {
+            // Ending arbitration on the first touch up event is much simpler
+            // than keeping track of touch points that already received an up
+            // event until arbitration is completed, and it's not clear that
+            // complexity would give any concrete benefit.
+            // It also reduces latency for quick taps.
+            seat.touchPassthrough();
+            continue :state seat.touch_state;
+        },
+        .passthrough => {
+            assert(seat.touch_gestures.active == null);
+            assert(seat.touch_points.orderedRemove(event.touch_id));
+            _ = seat.wlr_seat.touchNotifyUp(event.time_msec, event.touch_id);
+        },
+        .eat => {
+            assert(seat.touch_points.orderedRemove(event.touch_id));
+            if (seat.touch_gestures.active) |gesture| {
+                server.wm.dirtyWindowing();
+                if (seat.touch_points.count() == 0) {
+                    gesture.end();
+                }
+            }
+        },
+    }
+    if (seat.touch_points.count() == 0) {
+        seat.touch_state = .init;
+    }
+
+    if (seat.touch_ops.getPtr(event.touch_id)) |op| {
+        assert(op.scheduled == .none);
+        op.scheduled = .release;
+        server.wm.dirtyWindowing();
+    }
+}
+
+pub fn processTouchCancel(seat: *Seat) void {
+    // Cancel events are emitted by libinput when, for example, it is determined
+    // that the touch input is actually from a palm and should be ignored.
+
+    if (seat.touch_gestures.active) |gesture| gesture.cancel();
+
+    seat.touch_points.clearRetainingCapacity();
+    seat.touch_arbitration_timer.timerUpdate(0) catch {};
+    seat.touch_state = .init;
+
+    seat.touchOpCancel();
+}
+
+pub fn touchOpCancel(seat: *Seat) void {
+    for (seat.touch_ops.values()) |*op| {
+        assert(op.scheduled == .none);
+        op.scheduled = .cancel;
+        server.wm.dirtyWindowing();
+    }
+
+    const wlr_seat = seat.wlr_seat;
+    while (wlr_seat.touch_state.touch_points.first()) |touch_point| {
+        wlr_seat.touchNotifyCancel(touch_point.client);
+    }
+}
+
+fn touchPointSendDown(seat: *Seat, touch_id: i32, touch_point: *TouchPoint) void {
+    assert(touch_point.sent_down == null);
+    if (server.scene.at(touch_point.lx_down, touch_point.ly_down)) |result| {
+        seat.interact(result);
+
+        if (result.surface) |surface| {
+            touch_point.sent_down = .{
+                .sx = result.sx,
+                .sy = result.sy,
+                .serial = seat.wlr_seat.touchNotifyDown(
+                    surface,
+                    touch_point.msec_down,
+                    touch_id,
+                    result.sx,
+                    result.sy,
+                ),
+            };
+        }
+    }
+    if (touch_point.sent_down) |down| {
+        if (touch_point.lx != touch_point.lx_down or touch_point.ly != touch_point.ly_down) {
+            const sx = down.sx + (touch_point.lx - touch_point.lx_down);
+            const sy = down.sy + (touch_point.ly - touch_point.ly_down);
+            seat.wlr_seat.touchNotifyMotion(touch_point.msec_motion, touch_id, sx, sy);
+        }
+    }
+}
+
 /// Fire the window manager keybinding for `keysym`, or consume the gesture if
 /// unbound. Bindings are matched by keysym directly: the reserved keysyms
 /// need not exist in any keymap.
@@ -640,6 +932,77 @@ fn naturalScroll(wlr_device: *wlr.InputDevice) bool {
     return false;
 }
 
+fn touchArbitrationTimeout(seat: *Seat) c_int {
+    seat.touchPassthrough();
+    return 0;
+}
+
+fn touchPassthrough(seat: *Seat) void {
+    log.debug("touch passthrough started", .{});
+    assert(seat.touch_state == .arbitration);
+    seat.touch_arbitration_timer.timerUpdate(0) catch {};
+    seat.touch_state = .passthrough;
+    for (seat.touch_points.keys(), seat.touch_points.values()) |touch_id, *touch_point| {
+        seat.touchPointSendDown(touch_id, touch_point);
+    }
+}
+
+fn touchEat(seat: *Seat) void {
+    switch (seat.touch_state) {
+        .arbitration, .passthrough => {},
+        .init, .eat => unreachable,
+    }
+    seat.touch_arbitration_timer.timerUpdate(0) catch {};
+    seat.touch_state = .eat;
+    seat.touchOpCancel();
+}
+
+/// Returns the ID of the matching touch point or null if invalid.
+pub fn validateTouchSerial(seat: *Seat, serial: u32) ?i32 {
+    for (seat.touch_points.keys(), seat.touch_points.values()) |touch_id, touch_point| {
+        if (touch_point.sent_down) |down| {
+            if (down.serial == serial) {
+                return touch_id;
+            }
+        }
+    }
+    return null;
+}
+
+pub fn interact(seat: *Seat, result: Scene.AtResult) void {
+    switch (result.data) {
+        .window => |window| {
+            seat.wm_scheduled.interaction = .{ .window = window.ref };
+            server.wm.dirtyWindowing();
+        },
+        .shell_surface => |shell_surface| {
+            seat.wm_scheduled.interaction = .{ .shell_surface = shell_surface };
+            server.wm.dirtyWindowing();
+        },
+        .lock_surface => |lock_surface| {
+            assert(server.lock_manager.state != .unlocked);
+            seat.focus(.{ .lock_surface = lock_surface });
+        },
+        .layer_surface => |layer_surface| {
+            switch (seat.layer_shell.scheduled.focus) {
+                .none, .non_exclusive => {
+                    if (layer_surface.wlr_layer_surface.current.keyboard_interactive == .on_demand) {
+                        seat.layer_shell.scheduled.focus = .{
+                            .non_exclusive = layer_surface.ref,
+                        };
+                        server.wm.dirtyWindowing();
+                    }
+                },
+                .exclusive => {},
+            }
+        },
+        .override_redirect => |override_redirect| {
+            assert(server.lock_manager.state != .locked);
+            override_redirect.focusIfDesired();
+        },
+    }
+}
+
 pub fn manageStart(seat: *Seat) void {
     if (seat.destroying) {
         seat.destroy();
@@ -648,6 +1011,7 @@ pub fn manageStart(seat: *Seat) void {
 
     seat.layer_shell.manageStart();
     seat.xkb_bindings_seat.manageStart();
+    seat.touch_gestures.manageStart();
 
     if (server.wm.object) |wm_v1| {
         const new = seat.object == null;
@@ -731,12 +1095,44 @@ pub fn manageStart(seat: *Seat) void {
         }
 
         if (seat.op) |*op| {
-            seat_v1.sendOpDelta(op.x - op.start_x, op.y - op.start_y);
+            const x: i32 = @intFromFloat(seat.cursor.wlr_cursor.x);
+            const y: i32 = @intFromFloat(seat.cursor.wlr_cursor.y);
+            seat_v1.sendOpDelta(x - op.start_x, y - op.start_y);
 
             if (seat.wm_scheduled.op_release and !op.sent_release) {
                 seat_v1.sendOpRelease();
                 seat.wm_scheduled.op_release = false;
                 op.sent_release = true;
+            }
+        }
+
+        {
+            var i: usize = 0;
+            while (i < seat.touch_ops.count()) {
+                const touch_id = seat.touch_ops.keys()[i];
+                const op = seat.touch_ops.values()[i];
+                assert(seat_v1.getVersion() >= 6);
+                if (seat.touch_points.get(touch_id)) |touch_point| {
+                    seat_v1.sendOpDeltaTouch(
+                        touch_id,
+                        @intFromFloat(touch_point.lx - touch_point.lx_down),
+                        @intFromFloat(touch_point.ly - touch_point.ly_down),
+                    );
+                }
+                switch (op.scheduled) {
+                    .none => {},
+                    .release => {
+                        seat_v1.sendOpReleaseTouch(touch_id);
+                        seat.touch_ops.swapRemoveAt(i);
+                        continue; // Don't increment i
+                    },
+                    .cancel => {
+                        seat_v1.sendOpCancelTouch(touch_id);
+                        seat.touch_ops.swapRemoveAt(i);
+                        continue; // Don't increment i
+                    },
+                }
+                i += 1;
             }
         }
 
@@ -785,6 +1181,7 @@ pub fn manageStart(seat: *Seat) void {
             }
         }
     }
+
     // Ensure we don't store an interaction that happens while no window manager
     // is connected until a new window manager connects.
     seat.wm_scheduled.interaction = .none;
@@ -814,10 +1211,11 @@ fn handleRequestInert(
 
 fn handleDestroy(_: *river.SeatV1, seat: *Seat) void {
     seat.object = null;
-    seat.opEnd();
+    seat.cursor.opEndPointer();
 
     seat.layer_shell.makeInert();
     seat.xkb_bindings_seat.makeInert();
+    seat.touch_gestures.makeInert();
 
     while (seat.xkb_bindings.first()) |binding| binding.destroy();
     while (seat.pointer_bindings.first()) |binding| binding.destroy();
@@ -884,6 +1282,17 @@ fn handleRequest(
             if (!server.wm.ensureWindowing()) return;
             seat.wm_requested.pointer_warp = .{ .x = args.x, .y = args.y };
         },
+        .op_start_touch => |args| {
+            if (!server.wm.ensureWindowing()) return;
+            if (!seat.touch_points.contains(args.touch_point)) return;
+            const gop = seat.touch_ops.getOrPutAssumeCapacity(args.touch_point);
+            if (gop.found_existing) return;
+            gop.value_ptr.* = .{ .requested = .start };
+        },
+        .op_end_touch => |args| {
+            if (!server.wm.ensureWindowing()) return;
+            _ = seat.touch_ops.swapRemove(args.touch_point);
+        },
     }
 }
 
@@ -933,21 +1342,35 @@ pub fn manageFinish(seat: *Seat) void {
 
     switch (seat.wm_requested.op) {
         .none => {},
-        .start_pointer,
-        => if (seat.op == null) {
+        .start_pointer => if (seat.op == null) {
             log.debug("start seat op pointer", .{});
             seat.op = .{
-                .input = .pointer,
                 .start_x = @intFromFloat(seat.cursor.wlr_cursor.x),
                 .start_y = @intFromFloat(seat.cursor.wlr_cursor.y),
-                .x = @intFromFloat(seat.cursor.wlr_cursor.x),
-                .y = @intFromFloat(seat.cursor.wlr_cursor.y),
             };
             seat.cursor.opStartPointer();
         },
-        .end => seat.opEnd(),
+        .end => seat.cursor.opEndPointer(),
     }
     seat.wm_requested.op = .none;
+
+    for (seat.touch_ops.keys(), seat.touch_ops.values()) |touch_id, *op| {
+        switch (op.requested) {
+            .none => {},
+            .start => {
+                if (seat.touch_gestures.active == null) {
+                    // This wlroots function has no effect if wl_touch.down was never sent.
+                    _ = seat.wlr_seat.touchNotifyUp(util.msecTimestamp(), touch_id);
+                } else {
+                    // Gestures have priority over ops, cancel the op
+                    assert(op.scheduled == .none);
+                    op.scheduled = .cancel;
+                    server.wm.dirtyWindowing();
+                }
+            },
+        }
+        op.requested = .none;
+    }
 }
 
 pub fn focus(seat: *Seat, new_focus: Focus) void {
@@ -1096,10 +1519,7 @@ pub fn matchXkbBinding(
     return found;
 }
 
-pub fn matchPointerBinding(
-    seat: *Seat,
-    button: u32,
-) ?*PointerBinding {
+pub fn matchPointerBinding(seat: *Seat, button: u32) ?*PointerBinding {
     const wlr_keyboard = seat.wlr_seat.getKeyboard() orelse return null;
     const modifiers = wlr_keyboard.getModifiers();
 
@@ -1118,23 +1538,6 @@ pub fn matchPointerBinding(
     }
 
     return found;
-}
-
-pub fn opUpdate(seat: *Seat, x: i32, y: i32) void {
-    const op = &seat.op.?;
-    op.x = x;
-    op.y = y;
-    server.wm.dirtyWindowingLazy();
-}
-
-pub fn opEnd(seat: *Seat) void {
-    if (seat.op) |op| {
-        log.debug("end seat op", .{});
-        seat.op = null;
-        switch (op.input) {
-            .pointer => seat.cursor.opEndPointer(),
-        }
-    }
 }
 
 pub fn attachNewDevice(seat: *Seat, wlr_device: *wlr.InputDevice, options: InputDevice.Options) void {
@@ -1207,23 +1610,30 @@ pub fn detachDevice(seat: *Seat, device: *InputDevice) void {
 }
 
 pub fn updateCapabilities(seat: *Seat) void {
-    // Currently a cursor is always drawn even if there are no pointer input devices.
-    // TODO Don't draw a cursor if there are no input devices.
-    var capabilities: wl.Seat.Capability = .{ .pointer = true };
+    const previous = seat.wlr_seat.capabilities;
+    var current: wl.Seat.Capability = .{};
 
     var it = server.input_manager.devices.iterator(.forward);
     while (it.next()) |device| {
         if (device.seat == seat) {
             switch (device.wlr_device.type) {
-                .keyboard => capabilities.keyboard = true,
-                .touch => capabilities.touch = true,
-                .pointer, .@"switch", .tablet => {},
+                .keyboard => current.keyboard = true,
+                .touch => current.touch = true,
+                .pointer => current.pointer = true,
+                .@"switch", .tablet => {},
                 .tablet_pad => unreachable,
             }
         }
     }
 
-    seat.wlr_seat.setCapabilities(capabilities);
+    // setImage() is a noop when the seat lacks the pointer capability
+    if (!current.pointer) {
+        seat.cursor.setImage(.none);
+    }
+    seat.wlr_seat.setCapabilities(current);
+    if (current.pointer and !previous.pointer) {
+        seat.cursor.setImage(seat.cursor.wm_image);
+    }
 }
 
 fn handleRequestSetSelection(
@@ -1276,11 +1686,22 @@ fn handleStartDrag(listener: *wl.Listener(*wlr.Drag), wlr_drag: *wlr.Drag) void 
     wlr_drag.events.destroy.add(&seat.drag_destroy);
 
     if (wlr_drag.icon) |wlr_drag_icon| {
-        DragIcon.create(wlr_drag_icon, &seat.cursor) catch {
+        DragIcon.create(wlr_drag_icon, seat) catch {
             log.err("out of memory", .{});
             wlr_drag.seat_client.client.postNoMemory();
             return;
         };
+    }
+}
+
+pub fn updateDragIcons(seat: *Seat) void {
+    var it = server.scene.drag_icons.children.iterator(.forward);
+    while (it.next()) |node| {
+        const icon = @as(*DragIcon, @ptrCast(@alignCast(node.data)));
+
+        if (icon.wlr_drag_icon.drag.seat == seat.wlr_seat) {
+            icon.updatePosition(seat);
+        }
     }
 }
 

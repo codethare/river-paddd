@@ -8,6 +8,8 @@ body:
   - type: markdown
     attributes:
       value: |
+        Note: Use of generative AI/LLMs is strictly forbidden on the river issue tracker.
+
         Please provide as many details as possible, we must be able to
         understand the bug in order to fix it.
 
