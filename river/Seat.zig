@@ -891,8 +891,10 @@ fn touchPointSendDown(seat: *Seat, touch_id: i32, touch_point: *TouchPoint) void
 fn injectGestureKey(seat: *Seat, keysym: xkb.Keysym) void {
     if (seat.pending_gesture_release != null) return; // a press is still unacked
 
-    const group = seat.gestureGroup() orelse return;
-    const modifiers = group.state.getModifiers();
+    // Modifiers come from the active keyboard, same as upstream's matchPointerBinding:
+    // a synced virtual keyboard is the seat keyboard with no KeyboardGroup.
+    const wlr_keyboard = seat.wlr_seat.getKeyboard() orelse return;
+    const modifiers = wlr_keyboard.getModifiers();
 
     var it = seat.xkb_bindings.iterator(.forward);
     while (it.next()) |binding| {
@@ -927,12 +929,6 @@ fn injectGestureButton(seat: *Seat, button: u32) void {
     } else {
         log.debug("gesture button {d} is unbound, swallowed", .{button});
     }
-}
-
-/// The keyboard group whose state is the seat keyboard, or the first one.
-fn gestureGroup(seat: *Seat) ?*KeyboardGroup {
-    const wlr_keyboard = seat.wlr_seat.getKeyboard() orelse return seat.keyboard_groups.first();
-    return @ptrCast(@alignCast(wlr_keyboard.data));
 }
 
 /// Scale of the output under the cursor, used to normalize the bridged drag:
