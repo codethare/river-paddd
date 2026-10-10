@@ -1303,28 +1303,37 @@ pub fn renderFinish(window: *Window) void {
     window.popup_tree.node.setEnabled(enabled);
 }
 
+/// The box the border ring is drawn around: the content box, clipped to the
+/// content clip box when the wm set one, per the protocol. Null when the clip
+/// leaves no content, in which case there is no border to draw either. Only the
+/// resulting size is used, as in upstream's border drawing.
+fn borderContentBox(content: wlr.Box, content_clip: wlr.Box) ?wlr.Box {
+    if (content_clip.empty()) return content;
+    var clipped = content;
+    if (!clipped.intersection(&clipped, &content_clip)) return null;
+    return clipped;
+}
+
 fn drawBorders(window: *Window) void {
     const requested = &window.rendering_requested;
     const border = &requested.border;
-    const content_width: usize = @intCast(window.box.width);
-    const content_height: usize = @intCast(window.box.height);
     const border_width = border.width;
     const edges = border.edges;
+
+    // A window the wm has clipped keeps its border at the clip edge. This also
+    // covers a fully clipped window (e.g. a closing animation), which draws no
+    // border at all.
+    const content_box = borderContentBox(window.box, requested.content_clip) orelse {
+        window.border_rendered.valid = false;
+        hideBorder(window);
+        return;
+    };
+    const content_width: usize = @intCast(content_box.width);
+    const content_height: usize = @intCast(content_box.height);
     const drawable = border_width != 0 and content_width != 0 and content_height != 0 and
         (edges.top or edges.bottom or edges.left or edges.right);
 
-    // Mirror the old behavior: while the content is fully clipped away (e.g.
-    // a closing animation), draw no borders either.
-    var content_box: wlr.Box = .{
-        .x = 0,
-        .y = 0,
-        .width = window.box.width,
-        .height = window.box.height,
-    };
-    const fully_clipped = !requested.content_clip.empty() and
-        !content_box.intersection(&content_box, &requested.content_clip);
-
-    if (!drawable or fully_clipped) {
+    if (!drawable) {
         window.border_rendered.valid = false;
         hideBorder(window);
         return;
@@ -1845,6 +1854,26 @@ test "corner textures do not depend on the window size" {
         try testing.expect(hasPartialCoverage(small_frame, raster));
         try testing.expect(hasPartialCoverage(large_frame, raster));
     }
+}
+
+test "the border box follows the content clip box" {
+    const testing = std.testing;
+    const content: wlr.Box = .{ .x = 0, .y = 0, .width = 200, .height = 100 };
+    const no_clip: wlr.Box = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+
+    // No content clip set: the border wraps the whole content.
+    try expectBox(content, borderContentBox(content, no_clip).?);
+
+    // Content clipped by the wm: the border shrinks to the clip box, so a
+    // window smaller than the content it could not shrink keeps its border at
+    // the edge of what is actually visible.
+    try expectBox(
+        wlr.Box{ .x = 0, .y = 0, .width = 60, .height = 40 },
+        borderContentBox(content, .{ .x = 0, .y = 0, .width = 60, .height = 40 }).?,
+    );
+
+    // Clipped away entirely: nothing left to draw a border around.
+    try testing.expect(borderContentBox(content, .{ .x = 500, .y = 500, .width = 10, .height = 10 }) == null);
 }
 
 test "border geometry covers exactly the ring" {
