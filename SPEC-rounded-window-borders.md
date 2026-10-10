@@ -23,7 +23,8 @@
 - 四角:每角一张 `size×size`(size = max(r, bw))ARGB8888 纹理,自定义 `wlr.Buffer`(实现 `wlr_buffer_impl` 的 `get_shm` / `begin_data_ptr_access`)。逐像素覆盖度 `alpha = clamp(r - dist((x,y),(r,r)), 0, 1)` 得到 1px 软边;`bw < r` 时角部含月牙形 band;预乘 alpha。clip 外的像素写 0(透明)。
 - 开销:每窗口四张 `size²` 纹理(r≤10 → 400 px/角,合计 ~1.6 KB),与全帧纹理方案(4K 窗口 ~33 MB + 全屏填充率)相比内存与带宽降低约 4 个数量级;边条为零纹理矩形。尺寸/edges/颜色/clip 变化时重建。
 - 内容不溢出:wlroots 0.20 场景图无法对客户端内容做圆角裁剪(只有矩形 clip),因此有效半径按边框宽度收敛:
-  `r_eff = min(10, floor((bw + 0.5)·(2+√2)))`,保证内容方角保持在圆弧内侧(如 bw=2 → r=8)。
+  `r_eff = min(10, floor((bw + 0.5)·t/(t−1)))`,`t = 2^(1/n)`(角曲线为超椭圆 `|x|^n+|y|^n=r^n`,n=5,
+  见 `river/Window.zig` 的 `corner_exponent`),保证内容方角保持在曲线内侧(如 bw=2 → r=19)。
 - 已知退化:极窄窗口(`min(fw,fh) < 2·size`)四角纹理可能彼此重叠,半透明边框在该处会叠加两次;不透明边框无差异。
 - 全屏/无边框窗口(`width=0` 或不画边):禁用全部节点,与现状等价。
 

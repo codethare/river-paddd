@@ -82,12 +82,14 @@ shipped in `doc/gestures.conf`; see
 the design rationale.
 
 Window borders are drawn with rounded outer corners (radius up to 10px,
-clamped per window so the square content corners stay inside the arc) using
-scene rects for the edges and small anti-aliased corner textures. The radius is
-the `border_radius` key of the same config file, and the clamp ties it to the
-border width: 3px caps it at 11, 4px at 15 and 6px at 22, so a larger radius
-needs a wider border. See `SPEC-rounded-window-borders.md` for the design
-rationale.
+clamped per window so the square content corners stay inside the curve) using
+scene rects for the edges and small anti-aliased corner textures. The corners
+are superelliptical, i.e. their curvature is continuous: a circular arc jumps
+from 0 to 1/r where it meets a straight edge, a superellipse fades out instead.
+The radius is the `border_radius` key of the same config file, and the clamp
+ties it to the border width: 3px caps it at 27, 4px at 34 and 6px at 50, so a
+larger radius needs a wider border. See `SPEC-rounded-window-borders.md` for
+the design rationale.
 
 ## Links
 

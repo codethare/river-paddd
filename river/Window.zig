@@ -238,11 +238,28 @@ fn borderGeometry(
     };
 }
 
+/// Exponent of the superellipse corner curve: 2 is a plain circular arc, larger
+/// values flatten the transition into the straight edges. 5 approximates the
+/// continuous corners Apple uses, whose curvature does not jump from 0 to 1/r
+/// where the corner meets a straight edge.
+const corner_exponent = 5.0;
+
+/// Corner metric of the point (dx, dy) relative to the corner's center: the
+/// superellipse `|dx|^n + |dy|^n = r^n` rewritten as `(|dx|^n + |dy|^n)^(1/n)`,
+/// so it can stand in for the euclidean distance below and equals it at n = 2.
+fn cornerMetric(dx: f64, dy: f64) f64 {
+    return math.pow(f64, math.pow(f64, @abs(dx), corner_exponent) +
+        math.pow(f64, @abs(dy), corner_exponent), 1.0 / corner_exponent);
+}
+
 /// Largest corner radius (pixels) for a border of the given width that keeps
-/// the content's square corners inside the arc, so no content pokes out of
-/// the rounded outline: (bw + 0.5) * (2 + sqrt(2)).
+/// the content's square corners inside the curve, so no content pokes out of
+/// the rounded outline. The curve crosses the corner's diagonal at
+/// r / 2^(1/n), so the content corner at (bw, bw) stays inside as long as
+/// r * (2^(1/n) - 1) <= bw * 2^(1/n); the 0.5 leaves room for the feather.
 fn overflowFreeRadius(bw: usize) usize {
-    const max = (@as(f64, @floatFromInt(bw)) + 0.5) * (2.0 + @sqrt(2.0));
+    const half_diagonal = math.pow(f64, 2.0, 1.0 / corner_exponent);
+    const max = (@as(f64, @floatFromInt(bw)) + 0.5) * half_diagonal / (half_diagonal - 1.0);
     return @intFromFloat(@floor(max));
 }
 
@@ -266,22 +283,21 @@ fn cornerScale(raster: usize, size: usize) f64 {
 
 /// Coverage of the point (x, y) — a pixel center in frame coordinates —
 /// relative to a rounded corner of radius r centered r pixels from both edges:
-/// 1 = fully inside the rounded rect, 0 = fully cut away. The arc boundary is
-/// feathered over one pixel.
+/// 1 = fully inside the rounded rect, 0 = fully cut away. The corner's curve —
+/// a superellipse, see corner_exponent — is feathered over one pixel.
 fn cornerCoverage(x: f64, y: f64, r: f64) f64 {
-    const dx = x - r;
-    const dy = y - r;
-    return @max(0, @min(1, r - @sqrt(dx * dx + dy * dy) + 0.5));
+    const dist = cornerMetric(x - r, y - r);
+    return @max(0, @min(1, r - dist + 0.5));
 }
 
 /// Coverage of the border ring's corner band over the window corner: points at
-/// a distance to the arc center between r - bw and r. The band is what makes
-/// the two strips visibly join around the corner when the border is thinner
-/// than the corner radius, and it is drawn above the window content.
+/// a metric distance to the arc center between r - bw and r. The band is what
+/// makes the two strips visibly join around the corner when the border is
+/// thinner than the corner radius, and it is drawn above the window content.
+/// Its inner edge is the corner curve scaled about the center by (r - bw) / r,
+/// which meets the strips exactly at the axes.
 fn bandCoverage(x: f64, y: f64, r: f64, bw: f64) f64 {
-    const dx = x - r;
-    const dy = y - r;
-    const dist = @sqrt(dx * dx + dy * dy);
+    const dist = cornerMetric(x - r, y - r);
     if (dist > r) return 0; // trimmed away by the corner
     if (dist < r - bw) return 0; // inside the ring's inner edge
     return @max(0, @min(1, r - dist + 0.5));
@@ -1315,7 +1331,7 @@ fn drawBorders(window: *Window) void {
     }
 
     // The corner textures are rasterized at the scale of the output the window
-    // is on, so the arcs stay crisp on HiDPI outputs.
+    // is on, so the corners stay crisp on HiDPI outputs.
     const scale = windowScale(window);
 
     const frame_width = content_width + 2 * border_width;
@@ -1328,9 +1344,7 @@ fn drawBorders(window: *Window) void {
     }
 
     // The scene graph cannot clip client content to a rounded rect, so the
-    // effective radius is bounded by the border width: the content's square
-    // corner stays inside the arc as long as
-    // r <= (bw + 0.5) * (2 + sqrt(2)).
+    // effective radius is bounded by the border width: see overflowFreeRadius().
     const radius: usize = @min(
         @as(usize, server.gesture_config.border_radius),
         @min(@min(frame_width, frame_height), overflowFreeRadius(border_width)),
@@ -1651,17 +1665,24 @@ pub fn notifyAppId(window: *Window) void {
 
 test "rounded border corner coverage" {
     const testing = std.testing;
-    // Fully outside the corner arc is cut away.
+    // Fully outside the corner curve is cut away.
     try testing.expectEqual(@as(f64, 0), cornerCoverage(0, 0, 10));
     // Deep inside the border region is fully covered.
     try testing.expectEqual(@as(f64, 1), cornerCoverage(9, 9, 10));
-    // The arc boundary is feathered over about one pixel.
-    const partial = cornerCoverage(2.5, 3.5, 10);
+    // The superellipse is fuller than a circular arc of the same radius: this
+    // point is on the arc's feathered edge but well inside the superellipse.
+    try testing.expectEqual(@as(f64, 1), cornerCoverage(3, 3, 10));
+    // The curve crosses the diagonal at r / 2^(1/n), where the feather puts the
+    // coverage halfway.
+    const diagonal = 10.0 - 10.0 / math.pow(f64, 2.0, 1.0 / corner_exponent);
+    try testing.expectApproxEqAbs(@as(f64, 0.5), cornerCoverage(diagonal, diagonal, 10), 1e-9);
+    // The curve boundary is feathered over about one pixel.
+    const partial = cornerCoverage(1.3, 1.3, 10);
     try testing.expect(partial > 0 and partial < 1);
-    // The overflow-free radius bound keeps content corners inside the arc.
-    try testing.expectEqual(@as(usize, 5), overflowFreeRadius(1));
-    try testing.expectEqual(@as(usize, 8), overflowFreeRadius(2));
-    try testing.expectEqual(@as(usize, 11), overflowFreeRadius(3));
+    // The overflow-free radius bound keeps content corners inside the curve.
+    try testing.expectEqual(@as(usize, 11), overflowFreeRadius(1));
+    try testing.expectEqual(@as(usize, 19), overflowFreeRadius(2));
+    try testing.expectEqual(@as(usize, 27), overflowFreeRadius(3));
 }
 
 test "border ring corner band spans the content corner" {
