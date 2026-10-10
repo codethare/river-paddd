@@ -209,7 +209,7 @@ fn borderGeometry(
     const frame_height = frame_bottom + bw;
     // A corner square is at least as wide as a strip, so the strips never need
     // an L-shaped rectangle stepping around a corner.
-    const size = @max(radius, bw);
+    const size = @max(cornerSize(radius), bw);
 
     // A side strip only extends past an edge that is drawn, and stops where
     // the corner squares take over.
@@ -238,29 +238,175 @@ fn borderGeometry(
     };
 }
 
-/// Exponent of the superellipse corner curve: 2 is a plain circular arc, larger
-/// values flatten the transition into the straight edges. 5 approximates the
-/// continuous corners Apple uses, whose curvature does not jump from 0 to 1/r
-/// where the corner meets a straight edge.
-const corner_exponent = 5.0;
+/// Continuous corner smoothing: how far the corner's shoulder reaches along
+/// each edge beyond where a plain quarter circle would touch it, as a fraction
+/// of the corner radius. The corner then extends (1 + corner_smoothing) * radius
+/// from its outer point and the curvature fades out along the shoulder instead
+/// of jumping from 0 to 1/radius where an arc meets an edge. 0 gives back the
+/// plain quarter circle.
+const corner_smoothing = 0.6;
 
-/// Corner metric of the point (dx, dy) relative to the corner's center: the
-/// superellipse `|dx|^n + |dy|^n = r^n` rewritten as `(|dx|^n + |dy|^n)^(1/n)`,
-/// so it can stand in for the euclidean distance below and equals it at n = 2.
-fn cornerMetric(dx: f64, dy: f64) f64 {
-    return math.pow(f64, math.pow(f64, @abs(dx), corner_exponent) +
-        math.pow(f64, @abs(dy), corner_exponent), 1.0 / corner_exponent);
+/// Reach of the corner curve along each edge, in units of the corner radius.
+const corner_reach_hat = 1 + corner_smoothing;
+
+/// Samples of the corner's outer boundary, evenly spaced in x over the corner's
+/// reach and in units of the corner radius: `y` is the boundary's height at that
+/// x, `tx` the x component of its unit tangent there, which turns a vertical
+/// offset from the boundary into a distance perpendicular to it.
+///
+/// The boundary is a circular arc of the corner radius, centered the radius away
+/// from both edges exactly where a plain rounded corner has its center, with one
+/// cubic Bézier per side joining it to the straight edge: the construction
+/// behind Apple's continuous corners, see
+/// https://www.figma.com/blog/desperately-seeking-squircles/. The corner is
+/// symmetric about its diagonal, so each half is a graph over x and this table
+/// evaluates the curve without solving the Bézier per pixel.
+const corner_boundary = buildCornerBoundary();
+
+const corner_samples = 33;
+
+const CornerPoint = struct { x: f64, y: f64 };
+
+const CornerSample = struct { y: f64, tx: f64 };
+
+/// Cubic Bézier at parameter `t`.
+fn cubicBezier(p0: CornerPoint, c1: CornerPoint, c2: CornerPoint, p1: CornerPoint, t: f64) CornerPoint {
+    const u = 1 - t;
+    return .{
+        .x = u * u * u * p0.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * p1.x,
+        .y = u * u * u * p0.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * p1.y,
+    };
 }
 
-/// Largest corner radius (pixels) for a border of the given width that keeps
-/// the content's square corners inside the curve, so no content pokes out of
-/// the rounded outline. The curve crosses the corner's diagonal at
-/// r / 2^(1/n), so the content corner at (bw, bw) stays inside as long as
-/// r * (2^(1/n) - 1) <= bw * 2^(1/n); the 0.5 leaves room for the feather.
+fn buildCornerBoundary() [corner_samples]CornerSample {
+    @setEvalBranchQuota(100000);
+    const s = corner_smoothing;
+    const reach = corner_reach_hat;
+    // Construction parameters for a radius of 1: the arc's chord and the Bézier
+    // control point offsets a, b, c, d add up to the reach along each edge.
+    const arc_half: f64 = 0.25 * math.pi * (1 - s); // half the arc's angular span
+    const arc_chord: f64 = @sin(arc_half) * math.sqrt2;
+    const beta: f64 = 0.25 * math.pi * s;
+    const c: f64 = @tan(beta / 2.0) * @cos(beta);
+    const d: f64 = c * @tan(beta);
+    const b: f64 = (reach - arc_chord - c - d) / 3.0;
+    const a: f64 = 2 * b;
+
+    const arc_start: CornerPoint = .{ .x = d, .y = reach - a - b - c };
+    const arc_end: CornerPoint = .{ .x = d + arc_chord, .y = arc_start.y - arc_chord };
+    const to_center: CornerPoint = .{ .x = arc_start.x - 1, .y = arc_start.y - 1 };
+
+    // Dense samples from the left edge to the top edge, for the resampling below.
+    const steps = 256;
+    var dense: [3 * (steps + 1)]CornerPoint = undefined;
+    var n: usize = 0;
+    for (0..steps + 1) |i| {
+        const t = @as(f64, @floatFromInt(i)) / steps;
+        dense[n] = cubicBezier(
+            .{ .x = 0, .y = reach },
+            .{ .x = 0, .y = reach - a },
+            .{ .x = 0, .y = reach - a - b },
+            arc_start,
+            t,
+        );
+        n += 1;
+    }
+    for (0..steps + 1) |i| {
+        const angle = 2 * arc_half * @as(f64, @floatFromInt(i)) / steps;
+        const cos = @cos(angle);
+        const sin = @sin(angle);
+        dense[n] = .{
+            .x = 1 + to_center.x * cos - to_center.y * sin,
+            .y = 1 + to_center.x * sin + to_center.y * cos,
+        };
+        n += 1;
+    }
+    for (0..steps + 1) |i| {
+        const t = @as(f64, @floatFromInt(i)) / steps;
+        dense[n] = cubicBezier(
+            arc_end,
+            .{ .x = arc_end.x + c, .y = arc_end.y - d },
+            .{ .x = arc_end.x + b + c, .y = arc_end.y - d },
+            .{ .x = reach, .y = 0 },
+            t,
+        );
+        n += 1;
+    }
+
+    var out: [corner_samples]CornerSample = undefined;
+    var slot: usize = 0;
+    for (&out, 0..) |*sample, i| {
+        const x = reach * @as(f64, @floatFromInt(i)) / (corner_samples - 1);
+        while (slot + 2 < n and dense[slot + 1].x < x) slot += 1;
+        const lo = dense[slot];
+        const hi = dense[slot + 1];
+        // The tangent comes from the neighbouring samples so that it is defined
+        // at both ends of the curve as well.
+        const before = if (slot > 0) dense[slot - 1] else lo;
+        const after = if (slot + 2 < n) dense[slot + 2] else hi;
+        const dx = after.x - before.x;
+        const dy = after.y - before.y;
+        const span = hi.x - lo.x;
+        sample.* = .{
+            .y = lo.y + (hi.y - lo.y) * (if (span > 0) (x - lo.x) / span else 0),
+            .tx = if (dx == 0 and dy == 0) 0 else @abs(dx) / @sqrt(dx * dx + dy * dy),
+        };
+    }
+    return out;
+}
+
+/// Boundary sample at `x`, in units of the corner radius, interpolated between
+/// the table's entries.
+fn cornerBoundaryAt(x: f64) CornerSample {
+    const last = corner_samples - 1;
+    const u = @min(@max(x / corner_reach_hat, 0), 1) * @as(f64, @floatFromInt(last));
+    const lo = @min(@as(usize, @intFromFloat(@floor(u))), last);
+    const hi = @min(lo + 1, last);
+    const f = u - @floor(u);
+    return .{
+        .y = corner_boundary[lo].y + (corner_boundary[hi].y - corner_boundary[lo].y) * f,
+        .tx = corner_boundary[lo].tx + (corner_boundary[hi].tx - corner_boundary[lo].tx) * f,
+    };
+}
+
+/// Signed distance from the corner's outline at a pixel center (x, y) in corner
+/// coordinates (the corner's outer point is the origin): positive inside the
+/// window, in pixels. The outline is symmetric about the corner's diagonal, so
+/// the half where y > x is evaluated as the mirror image of the other one.
+fn cornerDistance(x: f64, y: f64, r: f64) f64 {
+    const along = @max(x, y);
+    const across = @min(x, y);
+    // The outline is vertical at the corner's outer point, where the graph
+    // degenerates: that point is outside the outline for any radius.
+    if (along == 0) return -r;
+    const boundary = cornerBoundaryAt(along / r);
+    return (across / r - boundary.y) * boundary.tx * r;
+}
+
+/// Largest corner radius (pixels) for a border of the given width that keeps the
+/// content's square corners inside the outline, so no content pokes out of the
+/// rounded shape. The arc reaches radius * (1 - 1/sqrt(2)) along the corner's
+/// diagonal, like a plain quarter circle, so the content corner at (bw, bw)
+/// stays inside as long as radius <= (bw + 0.5) * (2 + sqrt(2)); the 0.5 leaves
+/// room for the feather.
 fn overflowFreeRadius(bw: usize) usize {
-    const half_diagonal = math.pow(f64, 2.0, 1.0 / corner_exponent);
-    const max = (@as(f64, @floatFromInt(bw)) + 0.5) * half_diagonal / (half_diagonal - 1.0);
+    const max = (@as(f64, @floatFromInt(bw)) + 0.5) * (2.0 + math.sqrt2);
     return @intFromFloat(@floor(max));
+}
+
+/// Reach of a corner in pixels: the side of the square a corner texture covers.
+fn cornerSize(radius: usize) usize {
+    return @intFromFloat(@ceil(@as(f64, @floatFromInt(radius)) * corner_reach_hat));
+}
+
+/// Corner radius used for a window: the requested radius, capped so that the
+/// corner squares of neighbouring corners stay disjoint — the curve reaches
+/// (1 + smoothing) * radius from each corner — and so that the content's square
+/// corners stay inside the outline (see overflowFreeRadius).
+fn effectiveRadius(content_width: usize, content_height: usize, bw: usize, requested: usize) usize {
+    const frame = @min(content_width + 2 * bw, content_height + 2 * bw);
+    const disjoint = @floor(@as(f64, @floatFromInt(frame)) / (2 * corner_reach_hat));
+    return @min(@min(requested, overflowFreeRadius(bw)), @as(usize, @intFromFloat(disjoint)));
 }
 
 /// Device pixel size of a corner texture: the corner square is `size` logical
@@ -282,25 +428,21 @@ fn cornerScale(raster: usize, size: usize) f64 {
 }
 
 /// Coverage of the point (x, y) — a pixel center in frame coordinates —
-/// relative to a rounded corner of radius r centered r pixels from both edges:
-/// 1 = fully inside the rounded rect, 0 = fully cut away. The corner's curve —
-/// a superellipse, see corner_exponent — is feathered over one pixel.
+/// relative to a rounded corner of radius r: 1 = fully inside the rounded
+/// outline, 0 = fully cut away. The outline is feathered over one pixel.
 fn cornerCoverage(x: f64, y: f64, r: f64) f64 {
-    const dist = cornerMetric(x - r, y - r);
-    return @max(0, @min(1, r - dist + 0.5));
+    return @max(0, @min(1, 0.5 + cornerDistance(x, y, r)));
 }
 
-/// Coverage of the border ring's corner band over the window corner: points at
-/// a metric distance to the arc center between r - bw and r. The band is what
-/// makes the two strips visibly join around the corner when the border is
-/// thinner than the corner radius, and it is drawn above the window content.
-/// Its inner edge is the corner curve scaled about the center by (r - bw) / r,
-/// which meets the strips exactly at the axes.
+/// Coverage of the border ring's corner band over the window corner: the part
+/// of the outline within the border's thickness of it. The band is what makes
+/// the two strips visibly join around the corner when the border is thinner
+/// than the corner radius, and it is drawn above the window content. Its outer
+/// edge is feathered like the outline, its inner edge a hard cut.
 fn bandCoverage(x: f64, y: f64, r: f64, bw: f64) f64 {
-    const dist = cornerMetric(x - r, y - r);
-    if (dist > r) return 0; // trimmed away by the corner
-    if (dist < r - bw) return 0; // inside the ring's inner edge
-    return @max(0, @min(1, r - dist + 0.5));
+    const distance = cornerDistance(x, y, r);
+    if (distance < 0 or distance > bw) return 0; // cut away, or inside the ring's inner edge
+    return @min(1, 0.5 + distance);
 }
 
 /// Ring membership and coverage at a pixel center (x, y) in frame coordinates:
@@ -308,6 +450,8 @@ fn bandCoverage(x: f64, y: f64, r: f64, bw: f64) f64 {
 fn ringCoverage(ctx: *const BorderFillContext, x: f64, y: f64) f64 {
     const bw = ctx.bw;
     const r = ctx.radius;
+    // The corner curve reaches further along the edges than the radius.
+    const reach = r * corner_reach_hat;
     const fr = ctx.frame_right;
     const fb = ctx.frame_bottom;
     const in_hole = x >= bw and x < fr and y >= bw and y < fb;
@@ -322,18 +466,18 @@ fn ringCoverage(ctx: *const BorderFillContext, x: f64, y: f64) f64 {
         const in_bottom = y >= fb and ctx.edges.bottom and x >= bw and x < fr;
         if (!in_left and !in_right and !in_top and !in_bottom) return 0;
         // Round the corner where the two adjacent edges are both drawn.
-        if (ctx.edges.top and ctx.edges.left and x < r and y < r) return cornerCoverage(x, y, r);
-        if (ctx.edges.top and ctx.edges.right and x >= ctx.fw - r and y < r) return cornerCoverage(ctx.fw - x, y, r);
-        if (ctx.edges.bottom and ctx.edges.left and x < r and y >= ctx.fh - r) return cornerCoverage(x, ctx.fh - y, r);
-        if (ctx.edges.bottom and ctx.edges.right and x >= ctx.fw - r and y >= ctx.fh - r) return cornerCoverage(ctx.fw - x, ctx.fh - y, r);
+        if (ctx.edges.top and ctx.edges.left and x < reach and y < reach) return cornerCoverage(x, y, r);
+        if (ctx.edges.top and ctx.edges.right and x >= ctx.fw - reach and y < reach) return cornerCoverage(ctx.fw - x, y, r);
+        if (ctx.edges.bottom and ctx.edges.left and x < reach and y >= ctx.fh - reach) return cornerCoverage(x, ctx.fh - y, r);
+        if (ctx.edges.bottom and ctx.edges.right and x >= ctx.fw - reach and y >= ctx.fh - reach) return cornerCoverage(ctx.fw - x, ctx.fh - y, r);
         return 1;
     }
     // Inside the content box, only the corner band of the ring, where both
     // adjacent edges are drawn.
-    if (ctx.edges.top and ctx.edges.left and x < r and y < r) return bandCoverage(x, y, r, bw);
-    if (ctx.edges.top and ctx.edges.right and x >= ctx.fw - r and y < r) return bandCoverage(ctx.fw - x, y, r, bw);
-    if (ctx.edges.bottom and ctx.edges.left and x < r and y >= ctx.fh - r) return bandCoverage(x, ctx.fh - y, r, bw);
-    if (ctx.edges.bottom and ctx.edges.right and x >= ctx.fw - r and y >= ctx.fh - r) return bandCoverage(ctx.fw - x, ctx.fh - y, r, bw);
+    if (ctx.edges.top and ctx.edges.left and x < reach and y < reach) return bandCoverage(x, y, r, bw);
+    if (ctx.edges.top and ctx.edges.right and x >= ctx.fw - reach and y < reach) return bandCoverage(ctx.fw - x, y, r, bw);
+    if (ctx.edges.bottom and ctx.edges.left and x < reach and y >= ctx.fh - reach) return bandCoverage(x, ctx.fh - y, r, bw);
+    if (ctx.edges.bottom and ctx.edges.right and x >= ctx.fw - reach and y >= ctx.fh - reach) return bandCoverage(ctx.fw - x, ctx.fh - y, r, bw);
     return 0;
 }
 
@@ -1353,10 +1497,13 @@ fn drawBorders(window: *Window) void {
     }
 
     // The scene graph cannot clip client content to a rounded rect, so the
-    // effective radius is bounded by the border width: see overflowFreeRadius().
-    const radius: usize = @min(
-        @as(usize, server.gesture_config.border_radius),
-        @min(@min(frame_width, frame_height), overflowFreeRadius(border_width)),
+    // effective radius is bounded by the border width and by the frame: see
+    // effectiveRadius().
+    const radius = effectiveRadius(
+        content_width,
+        content_height,
+        border_width,
+        server.gesture_config.border_radius,
     );
     const geometry = borderGeometry(content_width, content_height, border_width, radius, edges);
 
@@ -1674,24 +1821,38 @@ pub fn notifyAppId(window: *Window) void {
 
 test "rounded border corner coverage" {
     const testing = std.testing;
-    // Fully outside the corner curve is cut away.
+    // The corner's outer point and the pixel center next to it are cut away.
     try testing.expectEqual(@as(f64, 0), cornerCoverage(0, 0, 10));
-    // Deep inside the border region is fully covered.
+    try testing.expectEqual(@as(f64, 0), cornerCoverage(0.5, 0.5, 10));
+    // Deep inside the outline is fully covered, in the middle and on either
+    // side of the corner's diagonal.
     try testing.expectEqual(@as(f64, 1), cornerCoverage(9, 9, 10));
-    // The superellipse is fuller than a circular arc of the same radius: this
-    // point is on the arc's feathered edge but well inside the superellipse.
-    try testing.expectEqual(@as(f64, 1), cornerCoverage(3, 3, 10));
-    // The curve crosses the diagonal at r / 2^(1/n), where the feather puts the
-    // coverage halfway.
-    const diagonal = 10.0 - 10.0 / math.pow(f64, 2.0, 1.0 / corner_exponent);
-    try testing.expectApproxEqAbs(@as(f64, 0.5), cornerCoverage(diagonal, diagonal, 10), 1e-9);
-    // The curve boundary is feathered over about one pixel.
-    const partial = cornerCoverage(1.3, 1.3, 10);
-    try testing.expect(partial > 0 and partial < 1);
-    // The overflow-free radius bound keeps content corners inside the curve.
-    try testing.expectEqual(@as(usize, 11), overflowFreeRadius(1));
-    try testing.expectEqual(@as(usize, 19), overflowFreeRadius(2));
-    try testing.expectEqual(@as(usize, 27), overflowFreeRadius(3));
+    try testing.expectEqual(@as(f64, 1), cornerCoverage(1, 12, 10));
+    try testing.expectEqual(@as(f64, 1), cornerCoverage(17, 17, 10));
+    // The arc reaches radius * (1 - 1/sqrt(2)) along the diagonal, as a plain
+    // quarter circle does, so the feather puts the coverage halfway there.
+    const diagonal = 10.0 * (1 - 1.0 / math.sqrt2);
+    try testing.expectApproxEqAbs(@as(f64, 0.5), cornerCoverage(diagonal, diagonal, 10), 0.05);
+    // The shoulder reaches past the radius and beyond a plain arc: this point
+    // is outside the quarter circle of the same radius but inside the outline.
+    try testing.expect(cornerCoverage(13, 0.2, 10) > 0.5);
+    // The overflow-free radius bound keeps content corners inside the outline.
+    try testing.expectEqual(@as(usize, 5), overflowFreeRadius(1));
+    try testing.expectEqual(@as(usize, 8), overflowFreeRadius(2));
+    try testing.expectEqual(@as(usize, 11), overflowFreeRadius(3));
+}
+
+test "the effective radius keeps corner squares disjoint" {
+    const testing = std.testing;
+    // A window with room for it gets the requested radius.
+    try testing.expectEqual(@as(usize, 10), effectiveRadius(200, 100, 3, 10));
+    // Without the frame cap the corner squares of a small window would overlap,
+    // which is what the cap is for: 2 * cornerSize(11) does not fit in 26.
+    try testing.expect(2 * cornerSize(overflowFreeRadius(3)) > 20 + 2 * 3);
+    inline for (.{ 200, 40, 30, 20, 10 }) |width| {
+        const radius = effectiveRadius(width, width, 3, 30);
+        try testing.expect(2 * cornerSize(radius) <= width + 2 * 3);
+    }
 }
 
 test "border ring corner band spans the content corner" {
@@ -1748,16 +1909,18 @@ test "border geometry keeps the strips clear of the corners" {
     const testing = std.testing;
     const all: river.WindowV1.Edges = .{ .top = true, .bottom = true, .left = true, .right = true };
     const g = borderGeometry(100, 50, 3, 10, all);
-    // Frame 106x56: the 10px corner squares take 10px off each strip end.
-    try testing.expectEqual(@as(usize, 10), g.size);
-    try expectBox(.{ .x = 0, .y = 10, .width = 3, .height = 36 }, g.strips[0]);
-    try expectBox(.{ .x = 103, .y = 10, .width = 3, .height = 36 }, g.strips[1]);
-    try expectBox(.{ .x = 10, .y = 0, .width = 86, .height = 3 }, g.strips[2]);
-    try expectBox(.{ .x = 10, .y = 53, .width = 86, .height = 3 }, g.strips[3]);
-    try expectBox(.{ .x = 0, .y = 0, .width = 10, .height = 10 }, g.corners[0]);
-    try expectBox(.{ .x = 96, .y = 0, .width = 10, .height = 10 }, g.corners[1]);
-    try expectBox(.{ .x = 0, .y = 46, .width = 10, .height = 10 }, g.corners[2]);
-    try expectBox(.{ .x = 96, .y = 46, .width = 10, .height = 10 }, g.corners[3]);
+    // Frame 106x56: the corner square is 16px (the corner reaches
+    // (1 + smoothing) * radius along the edges) and takes that much off each
+    // strip end.
+    try testing.expectEqual(cornerSize(10), g.size);
+    try expectBox(.{ .x = 0, .y = 16, .width = 3, .height = 24 }, g.strips[0]);
+    try expectBox(.{ .x = 103, .y = 16, .width = 3, .height = 24 }, g.strips[1]);
+    try expectBox(.{ .x = 16, .y = 0, .width = 74, .height = 3 }, g.strips[2]);
+    try expectBox(.{ .x = 16, .y = 53, .width = 74, .height = 3 }, g.strips[3]);
+    try expectBox(.{ .x = 0, .y = 0, .width = 16, .height = 16 }, g.corners[0]);
+    try expectBox(.{ .x = 90, .y = 0, .width = 16, .height = 16 }, g.corners[1]);
+    try expectBox(.{ .x = 0, .y = 40, .width = 16, .height = 16 }, g.corners[2]);
+    try expectBox(.{ .x = 90, .y = 40, .width = 16, .height = 16 }, g.corners[3]);
 
     // An edge that is not drawn gets an empty strip.
     const left_top = borderGeometry(100, 50, 3, 10, .{ .top = true, .left = true });
@@ -1766,8 +1929,8 @@ test "border geometry keeps the strips clear of the corners" {
     try testing.expectEqual(@as(c_int, 0), left_top.strips[3].height);
 
     // A corner square is never narrower than a strip.
-    const thick = borderGeometry(100, 50, 12, 10, all);
-    try testing.expectEqual(@as(usize, 12), thick.size);
+    const thick = borderGeometry(100, 50, 20, 10, all);
+    try testing.expectEqual(@as(usize, 20), thick.size);
 }
 
 test "corner textures are rasterized at the output scale" {
@@ -1890,10 +2053,10 @@ test "border geometry covers exactly the ring" {
         const bw = case[2];
         const frame_width = content_width + 2 * bw;
         const frame_height = content_height + 2 * bw;
-        const radius = @min(case[3], @min(frame_width, frame_height));
+        const radius = effectiveRadius(content_width, content_height, bw, case[3]);
         const edges = case[4];
         const geometry = borderGeometry(content_width, content_height, bw, radius, edges);
-        // The corner squares only stay disjoint for these sizes.
+        // The frame cap above is what keeps the corner squares disjoint.
         try testing.expect(2 * geometry.size <= @min(frame_width, frame_height));
         const ctx = BorderFillContext{
             .fw = @floatFromInt(frame_width),
