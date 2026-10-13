@@ -716,6 +716,20 @@ box: wlr.Box = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
 foreign_toplevel_handle: ?*wlr.ExtForeignToplevelHandleV1 = null,
 wlr_toplevel_handle: ?*wlr.ForeignToplevelHandleV1 = null,
 
+/// Corner textures are decoration drawn over the window's content, so a click
+/// over one belongs to the content below it rather than to the texture. This is
+/// wlroots' hook for exactly that; upstream's border rects only ever sit outside
+/// the content box, which is why its hit testing needs no such thing.
+fn cornerRejectsInput(_: *wlr.SceneBuffer, _: *f64, _: *f64) callconv(.c) bool {
+    return false;
+}
+
+fn createCornerBuffer(tree: *wlr.SceneTree) error{OutOfMemory}!*wlr.SceneBuffer {
+    const scene_buffer = try tree.createSceneBuffer(null);
+    scene_buffer.point_accepts_input = cornerRejectsInput;
+    return scene_buffer;
+}
+
 pub fn create(impl: Impl) error{OutOfMemory}!*Window {
     assert(impl != .destroying);
 
@@ -748,10 +762,10 @@ pub fn create(impl: Impl) error{OutOfMemory}!*Window {
                 try tree.createSceneRect(0, 0, &.{ 0, 0, 0, 0 }),
             },
             .corners = .{
-                try tree.createSceneBuffer(null),
-                try tree.createSceneBuffer(null),
-                try tree.createSceneBuffer(null),
-                try tree.createSceneBuffer(null),
+                try createCornerBuffer(tree),
+                try createCornerBuffer(tree),
+                try createCornerBuffer(tree),
+                try createCornerBuffer(tree),
             },
         },
         .decorations_above = undefined,
