@@ -125,6 +125,13 @@ pub fn init(server: *Server, runtime_xwayland: bool) !void {
     // This keeps the code simpler and more readable.
 
     const wl_server = try wl.Server.create();
+
+    // Set the buffer size to 1MiB. This avoids clients that stall input processing
+    // by e.g. doing intensive CPU work on their main thread from getting killed
+    // by e.g. high poll rate mice.
+    // The 1MiB value chosen is consistent with mutter and sway.
+    // See: https://gitlab.freedesktop.org/wayland/wayland/-/merge_requests/188
+    wl_display_set_default_max_buffer_size(wl_server, 1024 * 1024);
     const loop = wl_server.getEventLoop();
 
     var session: ?*wlr.Session = undefined;
@@ -661,3 +668,6 @@ fn newCaptureSession(server: *Server, wlr_capture_session: *wlr.ExtImageCopyCapt
 
     server.wm.dirtyWindowing();
 }
+
+// TODO: remove this once it's supported in zig-wayland
+extern fn wl_display_set_default_max_buffer_size(server: *wl.Server, size: usize) void;
