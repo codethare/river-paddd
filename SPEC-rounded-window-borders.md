@@ -97,3 +97,21 @@ const cov: u8 = @intFromFloat(@max(0, @min(1, r - dist)) * 255);
 2. 是否需要"仅某些角圆角"(如仅顶部两角)?当前理解:四角全圆。
 3. 边框宽度可变区间:bw ≥ r 时圆角消失——已解决:有效半径 = 10px + 边框宽,任意宽度下圆角保持可见。
 4. 最大化窗口:保持矩形不圆角,还是同样圆角?(默认:与平铺一致,统一处理)
+
+## Round 3 update (0.6.0-dev)
+
+The corner geometry changed after round 1:
+
+- A corner is rounded only where **both** of its edges are drawn; elsewhere the
+  strips cover the corner square exactly as upstream's border rects do, and
+  `border_radius = 0` draws upstream's four rects with no texture at all (a
+  screencopy comparison against upstream is pixel for pixel identical).
+- The four rounded corners are congruent in their own frame, so one tile per
+  border serves all of them, mirrored into place by a scene transform; the wm's
+  clip box is mapped into the same frame per corner.
+- Tiles are cached and shared by every window (up to eight, and a tile no
+  window uses may be evicted), so a focus or border color change reuses a
+  texture instead of rasterizing and uploading one per window.
+
+The code is `river/RoundedBorder.zig` (fork-only) and the measurements against
+upstream are recorded in `tasks/plan-round3.md`.

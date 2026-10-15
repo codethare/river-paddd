@@ -83,15 +83,20 @@ the design rationale.
 
 Window borders are drawn with rounded outer corners (radius up to 10px,
 clamped per window so the square content corners stay inside the outline) using
-scene rects for the edges and small anti-aliased corner textures. The corner
-curve is a circular arc of the radius joined to the straight edges by one Bézier
-per side, so its curvature is continuous: a plain rounded rectangle jumps from 0
-to 1/r where an arc meets an edge. How far that shoulder reaches along the edges
-is the `corner_smoothing` constant in `river/Window.zig`. The radius is the
+scene rects for the edges and one small anti-aliased corner texture. Only a
+corner whose two edges are both drawn is rounded; elsewhere the strips cover the
+corner square exactly as upstream's border rects do, and `border_radius = 0`
+leaves the whole border square and textureless. The four rounded corners are
+congruent in their own frame, so they share one texture per border and are
+mirrored into place by a scene transform. The corner curve is a circular arc of
+the radius joined to the straight edges by one Bézier per side, so its curvature
+is continuous: a plain rounded rectangle jumps from 0 to 1/r where an arc meets
+an edge. How far that shoulder reaches along the edges is the
+`corner_smoothing` constant in `river/RoundedBorder.zig`. The radius is the
 `border_radius` key of the same config file, and the clamp ties it to the border
-width: 3px caps it at 11, 4px at 15 and 6px at 22, so a
-larger radius needs a wider border. See `SPEC-rounded-window-borders.md` for
-the design rationale.
+width: 3px caps it at 11, 4px at 15 and 6px at 22, so a larger radius needs a
+wider border. See `SPEC-rounded-window-borders.md` for the design and
+`river/RoundedBorder.zig` for the code.
 
 ## Links
 
