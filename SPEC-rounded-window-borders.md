@@ -113,5 +113,43 @@ The corner geometry changed after round 1:
   window uses may be evicted), so a focus or border color change reuses a
   texture instead of rasterizing and uploading one per window.
 
-The code is `river/RoundedBorder.zig` (fork-only) and the measurements against
-upstream are recorded in `tasks/plan-round3.md`.
+The code is `river/RoundedBorder.zig` (fork-only).
+
+### Measured
+
+Headless run of both compositors, ReleaseSafe builds with the same Zig and
+wlroots (upstream `1375240`), one 1280x720 output, the pixman renderer (EGL is
+unusable in that container), fieldwm as the window manager (border 3 or 20,
+focused rgb(141,214,0), unfocused rgb(160,160,160)) and 400x300 foot windows.
+One *cycle* spawns a window (which takes focus) and kills it, so both borders
+change color.
+
+Correctness, from screencopies: at radius 10 the four corners are exact
+mirrors of each other (top-left against mirror(top-right) and rotate(180) of
+bottom-right), which is the shared tile's transform; radius 0 against upstream
+is 0 differing pixels out of 921,600; radius 10 against upstream is 188
+differing pixels, the four arcs.
+
+Tile rasterizations per run of 31 windows and about 60 border changes (the
+instrumented build): 2 with the cache, one per border color, at border 3 and
+at border 20; 92 / 91 with the cache made non-resident; 0 at radius 0.
+
+Compositor CPU per focus cycle, ms, 60 cycles (30 for the border 20 row):
+
+| border | upstream | fork | fork, no cache |
+| --- | --- | --- | --- |
+| 0, no border | 6.00 | 6.00 | - |
+| 3, radius 10 | 7.33 / 7.17 / 7.17 | 7.83 / 8.00 / 8.00 | 8.17 |
+| 3, radius 0 | 7.33 | 7.50 | - |
+| 20, radius 69 | 7.33 | 10.33 | 14.33 |
+| 20, radius 0 | 7.17 | 7.17 | - |
+
+With one client repainting continuously, CPU over 10 s is 20.0 ms/s for both
+upstream and fork at border 3, and 19.0 ms/s for both at border 20: an
+unchanged border costs nothing per frame, because wlroots only re-composites
+damaged regions. Idle with no damage is 0 ms in 2 s for both.
+
+Not measured: the GL renderer (no EGL, so the upload path measured is pixman's),
+fractional output scales (the headless output is scale 1), power draw, and a
+real session on a GPU. The absolute milliseconds are pixman numbers on that
+CPU; the comparison against upstream is what generalizes.
